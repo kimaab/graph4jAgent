@@ -1,0 +1,28 @@
+    /** agent -> (tool calls? tools -> agent : END) */
+    static CompiledGraph<State> buildGraph(ChatModel chatModel) throws Exception {
+        List<ToolCallback> callbacks = tools();
+        SpringAIToolService toolService = new SpringAIToolService(callbacks);
+
+        StateGraph<State> graph = new StateGraph<State>(MessagesState.SCHEMA,
+                new SpringAIStateSerializer<State>(State::new))
+                .addNode("agent", node_async(state -> Map.of(
+                        MessagesState.MESSAGES_STATE,
+                        callModel(chatModel, callbacks, promptMessages(state.messages())))))
+                .addNode("tools", (org.bsc.langgraph4j.action.AsyncNodeAction<State>) state ->
+                        toolService.executeFunctions(lastAssistant(state).getToolCalls(), Map.of())
+                                .thenApply(r -> Map.of(MessagesState.MESSAGES_STATE,
+                                        (Object) ToolResponseMessage.builder()
+                                                .responses(r.toolResponses()).build())))
+                .addEdge(StateGraph.START, "agent")
+                .addConditionalEdges("agent",
+                        edge_async(state -> lastAssistant(state).hasToolCalls()
+                                ? "tools" : StateGraph.END),
+                        Map.of("tools", "tools", StateGraph.END, StateGraph.END))
+                .addEdge("tools", "agent");
+
+        // recursionLimit counts node transitions; a react turn costs two, plus entry/exit.
+        return graph.compile(CompileConfig.builder()
+                .checkpointSaver(new MemorySaver())
+                .recursionLimit(2 * MAX_ITERATIONS + 4)
+                .build());
+    }

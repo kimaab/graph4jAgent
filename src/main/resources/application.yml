@@ -1,0 +1,38 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: agent-studio-backend
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:192.168.105.3}:${DB_PORT:5432}/${DB_NAME:postgres}
+    username: ${DB_USERNAME:postgres}
+    password: "${DB_PASSWORD:mobigen12#$}"
+    driver-class-name: org.postgresql.Driver
+
+  sql:
+    init:
+      mode: always
+      continue-on-error: false
+
+  ai:
+    openai:
+      # Spring AI 2.0's OpenAI module runs on the official openai-java SDK, whose
+      # baseUrl already includes the API version segment (default
+      # https://api.openai.com/v1). Dropping /v1 here makes it request
+      # /chat/completions and the gateway answers 404 {"detail":"Not Found"}.
+      base-url: ${LLM_BASE_URL:http://192.168.109.254:32609/v1}
+      api-key: ${LLM_API_KEY:test_api_key}
+      chat:
+        options:
+          model: ${LLM_MODEL:google/gemma-4-31B-it}
+          temperature: 0.7
+
+agent:
+  # Model context window of the served model; used to trim history in the ReAct loop.
+  max-context-tokens: ${LLM_MAX_CONTEXT:16384}
+
+logging:
+  level:
+    org.bsc.langgraph4j: INFO

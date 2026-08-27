@@ -1,0 +1,34 @@
+    /** Each step feeds everything produced before it into the next prompt. */
+    static final List<String> STEP_PROMPTS = List.of(
+__STEP_PROMPTS__);
+
+    static CompiledGraph<State> buildGraph(ChatModel chatModel) throws Exception {
+        StateGraph<State> graph = new StateGraph<State>(MessagesState.SCHEMA,
+                new SpringAIStateSerializer<State>(State::new));
+
+        List<String> nodeNames = new ArrayList<>();
+        for (int i = 0; i < STEP_PROMPTS.size(); i++) {
+            String prompt = STEP_PROMPTS.get(i);
+            String nodeName = "step_" + i;
+            nodeNames.add(nodeName);
+            graph.addNode(nodeName, node_async(state -> {
+                UserMessage stepPrompt = new UserMessage(prompt);
+                List<Message> history = new ArrayList<>(state.messages());
+                history.add(stepPrompt);
+                AssistantMessage reply = callModel(chatModel, List.of(), promptMessages(history));
+                return Map.of(MessagesState.MESSAGES_STATE, List.of(stepPrompt, reply));
+            }));
+        }
+
+        graph.addEdge(StateGraph.START, nodeNames.getFirst());
+        for (int i = 0; i < nodeNames.size() - 1; i++) {
+            graph.addEdge(nodeNames.get(i), nodeNames.get(i + 1));
+        }
+        graph.addEdge(nodeNames.getLast(), StateGraph.END);
+
+        // A linear chain cannot loop, so the limit is only a backstop.
+        return graph.compile(CompileConfig.builder()
+                .checkpointSaver(new MemorySaver())
+                .recursionLimit(2 * STEP_PROMPTS.size() + 8)
+                .build());
+    }

@@ -1,0 +1,18 @@
+    /** Stub, same as the studio's: the interface is real, the backend is not wired. */
+    static final class WebSearch extends Tool {
+        WebSearch() {
+            super("web_search", "Search the web and return result snippets.",
+                    "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},"
+                            + "\"required\":[\"query\"]}");
+        }
+
+        @Override
+        public String call(String toolInput) {
+            String query = field(toolInput, "query");
+            if (query == null || query.isBlank()) {
+                return "error: 'query' is required";
+            }
+            return "web_search is not wired to a search backend yet. "
+                    + "No results available for: " + query;
+        }
+    }

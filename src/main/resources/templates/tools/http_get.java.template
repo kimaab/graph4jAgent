@@ -1,0 +1,49 @@
+    /** Fetches a URL as text, truncated so one page cannot flood the context. */
+    static final class HttpGet extends Tool {
+        HttpGet() {
+            super("http_get", "Fetch the text content at an http(s) URL.",
+                    "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},"
+                            + "\"required\":[\"url\"]}");
+        }
+
+        @Override
+        public String call(String toolInput) {
+            String url = field(toolInput, "url");
+            if (url == null || url.isBlank()) {
+                return "error: 'url' is required";
+            }
+            java.net.URI uri;
+            try {
+                uri = java.net.URI.create(url.trim());
+            } catch (IllegalArgumentException e) {
+                return "error: malformed url";
+            }
+            String scheme = uri.getScheme();
+            if (scheme == null
+                    || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
+                return "error: only http and https urls are allowed";
+            }
+            try {
+                java.net.http.HttpClient http = java.net.http.HttpClient.newBuilder()
+                        .connectTimeout(java.time.Duration.ofSeconds(10))
+                        .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
+                        .build();
+                java.net.http.HttpResponse<String> response = http.send(
+                        java.net.http.HttpRequest.newBuilder(uri)
+                                .timeout(java.time.Duration.ofSeconds(10))
+                                .header("User-Agent", "agent-studio/1.0")
+                                .GET().build(),
+                        java.net.http.HttpResponse.BodyHandlers.ofString());
+                String body = response.body();
+                if (body.length() > 8000) {
+                    body = body.substring(0, 8000) + "\n...[truncated]";
+                }
+                return "HTTP " + response.statusCode() + "\n" + body;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return "error: request interrupted";
+            } catch (Exception e) {
+                return "error: " + e.getClass().getSimpleName() + ": " + e.getMessage();
+            }
+        }
+    }

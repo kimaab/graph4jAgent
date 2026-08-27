@@ -1,0 +1,133 @@
+    /**
+     * Arithmetic only: numbers, + - * / %, parentheses, unary sign. A script engine
+     * would be shorter and would also hand the model arbitrary code execution.
+     */
+    static final class Calculator extends Tool {
+        Calculator() {
+            super("calculator",
+                    "Evaluate an arithmetic expression and return the numeric result.",
+                    "{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\"}},"
+                            + "\"required\":[\"expression\"]}");
+        }
+
+        @Override
+        public String call(String toolInput) {
+            String expression = field(toolInput, "expression");
+            if (expression == null || expression.isBlank()) {
+                return "error: 'expression' is required";
+            }
+            try {
+                double result = new Parser(expression).parse();
+                if (result == Math.rint(result) && !Double.isInfinite(result)) {
+                    return String.valueOf((long) result);
+                }
+                return String.valueOf(result);
+            } catch (ArithmeticException | IllegalArgumentException e) {
+                return "error: " + e.getMessage();
+            }
+        }
+
+        private static final class Parser {
+            private final String src;
+            private int pos;
+
+            Parser(String src) {
+                this.src = src;
+            }
+
+            double parse() {
+                double value = expression();
+                skipSpaces();
+                if (pos < src.length()) {
+                    throw new IllegalArgumentException(
+                            "unexpected character at position " + pos);
+                }
+                return value;
+            }
+
+            private double expression() {
+                double value = term();
+                while (true) {
+                    if (eat('+')) {
+                        value += term();
+                    } else if (eat('-')) {
+                        value -= term();
+                    } else {
+                        return value;
+                    }
+                }
+            }
+
+            private double term() {
+                double value = factor();
+                while (true) {
+                    if (eat('*')) {
+                        value *= factor();
+                    } else if (eat('/')) {
+                        double d = factor();
+                        if (d == 0) {
+                            throw new ArithmeticException("division by zero");
+                        }
+                        value /= d;
+                    } else if (eat('%')) {
+                        double d = factor();
+                        if (d == 0) {
+                            throw new ArithmeticException("division by zero");
+                        }
+                        value %= d;
+                    } else {
+                        return value;
+                    }
+                }
+            }
+
+            private double factor() {
+                if (eat('+')) {
+                    return factor();
+                }
+                if (eat('-')) {
+                    return -factor();
+                }
+                if (eat('(')) {
+                    double value = expression();
+                    if (!eat(')')) {
+                        throw new IllegalArgumentException("unbalanced parenthesis");
+                    }
+                    return value;
+                }
+                return number();
+            }
+
+            private double number() {
+                skipSpaces();
+                int start = pos;
+                while (pos < src.length()
+                        && (Character.isDigit(src.charAt(pos)) || src.charAt(pos) == '.')) {
+                    pos++;
+                }
+                if (start == pos) {
+                    throw new IllegalArgumentException("expected a number at position " + pos);
+                }
+                try {
+                    return Double.parseDouble(src.substring(start, pos));
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException("malformed number");
+                }
+            }
+
+            private boolean eat(char expected) {
+                skipSpaces();
+                if (pos < src.length() && src.charAt(pos) == expected) {
+                    pos++;
+                    return true;
+                }
+                return false;
+            }
+
+            private void skipSpaces() {
+                while (pos < src.length() && Character.isWhitespace(src.charAt(pos))) {
+                    pos++;
+                }
+            }
+        }
+    }
