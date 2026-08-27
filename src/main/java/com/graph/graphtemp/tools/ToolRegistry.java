@@ -35,15 +35,24 @@ public class ToolRegistry {
         return List.copyOf(byName.keySet());
     }
 
+    /** Every registered tool, in registration order. */
+    public List<BuiltinTool> all() {
+        return List.copyOf(byName.values());
+    }
+
     /**
      * @throws ApiException 400 naming the unknown tool, so a bad spec is rejected at
      *         save time rather than at run time.
      */
-    public List<ToolCallback> resolve(List<String> names) {
+    public List<BuiltinTool> resolveBuiltins(List<String> names) {
         return names.stream()
-                .map(name -> (ToolCallback) find(name).orElseThrow(() -> ApiException.badRequest(
+                .map(name -> find(name).orElseThrow(() -> ApiException.badRequest(
                         "unknown tool: " + name + " (available: " + String.join(", ", names()) + ")")))
                 .toList();
+    }
+
+    public List<ToolCallback> resolve(List<String> names) {
+        return resolveBuiltins(names).stream().map(tool -> (ToolCallback) tool).toList();
     }
 
     public List<ToolInfo> describe() {

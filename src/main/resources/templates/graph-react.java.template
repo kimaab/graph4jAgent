@@ -1,14 +1,14 @@
     /** agent -> (tool calls? tools -> agent : END) */
-    static CompiledGraph<State> buildGraph(ChatModel chatModel) throws Exception {
+    static CompiledGraph<State> buildGraph(ChatModel chatModel, boolean streaming) throws Exception {
         List<ToolCallback> callbacks = tools();
         SpringAIToolService toolService = new SpringAIToolService(callbacks);
 
         StateGraph<State> graph = new StateGraph<State>(MessagesState.SCHEMA,
                 new SpringAIStateSerializer<State>(State::new))
-                .addNode("agent", node_async(state -> Map.of(
-                        MessagesState.MESSAGES_STATE,
-                        callModel(chatModel, callbacks, promptMessages(state.messages())))))
-                .addNode("tools", (org.bsc.langgraph4j.action.AsyncNodeAction<State>) state ->
+                .addNode("agent", (AsyncNodeAction<State>) state -> completedFuture(
+                        modelTurn(chatModel, callbacks, promptMessages(state.messages()),
+                                state, "agent", streaming)))
+                .addNode("tools", (AsyncNodeAction<State>) state ->
                         toolService.executeFunctions(lastAssistant(state).getToolCalls(), Map.of())
                                 .thenApply(r -> Map.of(MessagesState.MESSAGES_STATE,
                                         (Object) ToolResponseMessage.builder()

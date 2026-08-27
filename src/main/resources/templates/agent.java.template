@@ -14,12 +14,16 @@ import com.openai.client.OpenAIClient;
 import com.openai.client.OpenAIClientAsync;
 import com.openai.client.okhttp.OpenAIOkHttpClient;
 import com.openai.client.okhttp.OpenAIOkHttpClientAsync;
+import org.bsc.async.AsyncGenerator;
 import org.bsc.langgraph4j.CompileConfig;
 import org.bsc.langgraph4j.CompiledGraph;
+import org.bsc.langgraph4j.NodeOutput;
 import org.bsc.langgraph4j.RunnableConfig;
 import org.bsc.langgraph4j.StateGraph;
+import org.bsc.langgraph4j.action.AsyncNodeAction;
 import org.bsc.langgraph4j.checkpoint.MemorySaver;
 import org.bsc.langgraph4j.prebuilt.MessagesState;
+import org.bsc.langgraph4j.spring.ai.generators.StreamingChatGenerator;
 import org.bsc.langgraph4j.spring.ai.serializer.std.SpringAIStateSerializer;
 import org.bsc.langgraph4j.spring.ai.tool.SpringAIToolService;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -28,20 +32,22 @@ import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
+import reactor.core.publisher.Flux;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static java.util.concurrent.CompletableFuture.completedFuture;
 import static org.bsc.langgraph4j.action.AsyncEdgeAction.edge_async;
-import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
 
 public class __CLASS_NAME__ {
 
@@ -69,7 +75,8 @@ public class __CLASS_NAME__ {
                 .openAiClientAsync(asyncClient)
                 .build();
 
-        Optional<State> result = buildGraph(chatModel).invoke(
+        // false: the CLI prints the finished answer, so it has no use for token chunks.
+        Optional<State> result = buildGraph(chatModel, false).invoke(
                 Map.of(MessagesState.MESSAGES_STATE, new UserMessage(message)),
                 RunnableConfig.builder().threadId("cli").build());
 
@@ -107,6 +114,35 @@ __GRAPH_BUILDER__
         return chatModel.call(new Prompt(messages, options(chatModel, callbacks)))
                 .getResult()
                 .getOutput();
+    }
+
+    /**
+     * The streaming twin of {@link #callModel}: emits one {@code StreamingOutput} per
+     * model chunk and folds the finished reply into the state. The studio turns those
+     * chunks into token events; a standalone run never asks for them.
+     */
+    static AsyncGenerator<? extends NodeOutput<State>> streamModel(
+            ChatModel chatModel, List<ToolCallback> callbacks, List<Message> messages,
+            State state, String nodeName) {
+        Flux<ChatResponse> flux = chatModel.stream(new Prompt(messages, options(chatModel, callbacks)));
+        return StreamingChatGenerator.<State>builder()
+                .startingNode(nodeName)
+                .startingState(state)
+                .mapResult(response -> Map.of(
+                        MessagesState.MESSAGES_STATE, response.getResult().getOutput()))
+                .build(flux);
+    }
+
+    /**
+     * One model turn, streaming or not. Returning the generator itself as the state
+     * update is what lets the runtime emit chunks before the reply is complete.
+     */
+    static Map<String, Object> modelTurn(ChatModel chatModel, List<ToolCallback> callbacks,
+                                         List<Message> messages, State state,
+                                         String nodeName, boolean streaming) {
+        return Map.of(MessagesState.MESSAGES_STATE, streaming
+                ? streamModel(chatModel, callbacks, messages, state, nodeName)
+                : callModel(chatModel, callbacks, messages));
     }
 
     static AssistantMessage lastAssistant(State state) {

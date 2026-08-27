@@ -28,12 +28,17 @@ public class WebConfig implements WebMvcConfigurer {
         });
     }
 
-    /** The Next.js dev server calls the API and SSE endpoint straight from the browser. */
+    /**
+     * The Next.js dev server calls the API and SSE endpoint straight from the browser.
+     * The code endpoint answers in headers rather than a JSON envelope, and a browser
+     * hides every response header that is not on the exposed list.
+     */
     @Override
     public void addCorsMappings(CorsRegistry registry) {
         registry.addMapping("/api/**")
                 .allowedOrigins("http://localhost:3000")
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
-                .allowedHeaders("*");
+                .allowedHeaders("*")
+                .exposedHeaders("X-Code-Edited", "X-Suggested-Filename");
     }
 }

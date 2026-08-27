@@ -3,8 +3,7 @@ package com.graph.graphtemp.run;
 import com.graph.graphtemp.agent.AgentSpec;
 import com.graph.graphtemp.agent.AgentSpecRepository;
 import com.graph.graphtemp.error.ApiException;
-import com.graph.graphtemp.graph.AgentGraphState;
-import com.graph.graphtemp.graph.GraphBuilder;
+import com.graph.graphtemp.graph.AgentGraphs;
 import jakarta.validation.Valid;
 import org.bsc.langgraph4j.CompiledGraph;
 import org.bsc.langgraph4j.NodeOutput;
@@ -49,12 +48,12 @@ public class RunController {
     private static final long SSE_TIMEOUT_MS = 10 * 60 * 1000L;
 
     private final AgentSpecRepository repository;
-    private final GraphBuilder graphBuilder;
+    private final AgentGraphs agentGraphs;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 
-    RunController(AgentSpecRepository repository, GraphBuilder graphBuilder) {
+    RunController(AgentSpecRepository repository, AgentGraphs agentGraphs) {
         this.repository = repository;
-        this.graphBuilder = graphBuilder;
+        this.agentGraphs = agentGraphs;
     }
 
     @PostMapping(value = "/{id}/run", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -63,15 +62,15 @@ public class RunController {
                 .orElseThrow(() -> ApiException.notFound("agent not found: " + id));
 
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
-        // Build before handing off: a bad spec should fail as a 400 on this request,
-        // not as an error event on a stream the client has already accepted.
-        CompiledGraph<AgentGraphState> graph = graphBuilder.buildStreaming(spec);
+        // Build before handing off: source that will not compile should fail as a 400 on
+        // this request, not as an error event on a stream the client has already accepted.
+        CompiledGraph<MessagesState<Message>> graph = agentGraphs.buildStreaming(spec);
 
         executor.execute(() -> stream(emitter, graph, request));
         return emitter;
     }
 
-    private void stream(SseEmitter emitter, CompiledGraph<AgentGraphState> graph, RunRequest request) {
+    private void stream(SseEmitter emitter, CompiledGraph<MessagesState<Message>> graph, RunRequest request) {
         RunnableConfig config = RunnableConfig.builder().threadId(request.threadId()).build();
 
         // Everything already in the thread belongs to earlier turns; replaying its tool
@@ -81,11 +80,11 @@ public class RunController {
                 .orElse(0);
 
         try {
-            for (NodeOutput<AgentGraphState> output :
+            for (NodeOutput<MessagesState<Message>> output :
                     graph.stream(Map.of(MessagesState.MESSAGES_STATE,
                             new UserMessage(request.message())), config)) {
 
-                if (output instanceof StreamingOutput<AgentGraphState> chunk) {
+                if (output instanceof StreamingOutput<?> chunk) {
                     String text = chunk.chunk();
                     if (text != null && !text.isEmpty()) {
                         send(emitter, "token", Map.of("text", text));
@@ -118,7 +117,7 @@ public class RunController {
      *
      * @return the new cursor
      */
-    private int emitSince(SseEmitter emitter, AgentGraphState state, int from) {
+    private int emitSince(SseEmitter emitter, MessagesState<Message> state, int from) {
         List<Message> messages = state.messages();
         for (int i = from; i < messages.size(); i++) {
             Message message = messages.get(i);

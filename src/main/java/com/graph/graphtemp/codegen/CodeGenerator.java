@@ -2,8 +2,9 @@ package com.graph.graphtemp.codegen;
 
 import com.graph.graphtemp.agent.AgentSpec;
 import com.graph.graphtemp.agent.Step;
-import com.graph.graphtemp.error.ApiException;
+import com.graph.graphtemp.tools.BuiltinTool;
 import com.graph.graphtemp.tools.ToolRegistry;
+import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
@@ -13,7 +14,6 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -33,17 +33,11 @@ public class CodeGenerator {
     private static final String OPENAI_SDK_VERSION = "4.49.0";
     private static final String SLF4J_VERSION = "2.0.17";
 
-    /** Tool name to the expression that builds the class its template defines. */
-    private static final Map<String, String> TOOL_CONSTRUCTORS = Map.of(
-            "calculator", "new Calculator()",
-            "http_get", "new HttpGet()",
-            "web_search", "new WebSearch()");
-
     private final ToolRegistry toolRegistry;
     private final String baseUrl;
     private final String apiKey;
 
-    CodeGenerator(ToolRegistry toolRegistry,
+    public CodeGenerator(ToolRegistry toolRegistry,
                   @Value("${spring.ai.openai.base-url}") String baseUrl,
                   @Value("${spring.ai.openai.api-key}") String apiKey) {
         this.toolRegistry = toolRegistry;
@@ -51,9 +45,25 @@ public class CodeGenerator {
         this.apiKey = apiKey;
     }
 
+    /**
+     * Fails the boot when a registered tool has no code template. Before this, a tool
+     * whose template was forgotten looked fine until someone exported an agent using
+     * it, and then answered 400 at that moment.
+     */
+    @PostConstruct
+    void verifyEveryToolHasATemplate() {
+        String missing = toolRegistry.all().stream()
+                .filter(tool -> !new ClassPathResource("templates/" + tool.codegenTemplate()).exists())
+                .map(tool -> tool.name() + " -> templates/" + tool.codegenTemplate())
+                .collect(Collectors.joining(", "));
+
+        if (!missing.isEmpty()) {
+            throw new IllegalStateException("tools with no code template: " + missing);
+        }
+    }
+
     public String generate(AgentSpec spec) {
-        // Fail here rather than emitting a file that cannot compile.
-        toolRegistry.resolve(spec.tools());
+        List<BuiltinTool> tools = toolRegistry.resolveBuiltins(spec.tools().stream().distinct().toList());
 
         return template("agent.java.template")
                 .replace("__LANGGRAPH4J__", LANGGRAPH4J_VERSION)
@@ -69,8 +79,8 @@ public class CodeGenerator {
                 .replace("__SYSTEM_PROMPT__", javaString(spec.systemPrompt()))
                 .replace("__MAX_ITERATIONS__", String.valueOf(spec.maxIterations()))
                 .replace("__GRAPH_BUILDER__", graphBuilder(spec))
-                .replace("__TOOL_CLASSES__", toolClasses(spec))
-                .replace("__TOOL_INSTANCES__", toolInstances(spec));
+                .replace("__TOOL_CLASSES__", toolClasses(tools))
+                .replace("__TOOL_INSTANCES__", toolInstances(tools));
     }
 
     /** The file name a client should save the generated source as. */
@@ -92,23 +102,15 @@ public class CodeGenerator {
                 .collect(Collectors.joining(",\n"));
     }
 
-    private String toolClasses(AgentSpec spec) {
-        return spec.tools().stream()
-                .distinct()
-                .map(name -> template("tools/" + name + ".java.template"))
+    private String toolClasses(List<BuiltinTool> tools) {
+        return tools.stream()
+                .map(tool -> template(tool.codegenTemplate()))
                 .collect(Collectors.joining("\n"));
     }
 
-    private static String toolInstances(AgentSpec spec) {
-        return spec.tools().stream()
-                .distinct()
-                .map(name -> {
-                    String constructor = TOOL_CONSTRUCTORS.get(name);
-                    if (constructor == null) {
-                        throw ApiException.badRequest("no code template for tool: " + name);
-                    }
-                    return constructor;
-                })
+    private static String toolInstances(List<BuiltinTool> tools) {
+        return tools.stream()
+                .map(BuiltinTool::codegenConstructor)
                 .collect(Collectors.joining(", "));
     }
 

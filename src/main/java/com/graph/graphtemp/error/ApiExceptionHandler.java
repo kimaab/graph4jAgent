@@ -1,5 +1,7 @@
 package com.graph.graphtemp.error;
 
+import com.graph.graphtemp.graph.CodeCompilationException;
+import com.graph.graphtemp.graph.GraphBuildException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -74,6 +76,25 @@ public class ApiExceptionHandler {
         String expected = required == null ? "the expected type" : required.getSimpleName();
         return ResponseEntity.badRequest().body(Map.of("detail",
                 "'" + ex.getName() + "' is not a valid " + expected + ": " + ex.getValue()));
+    }
+
+    /**
+     * The user's own source did not compile. javac's errors travel in their own list
+     * rather than the field-keyed {@code errors} map: they belong to lines in the code
+     * editor, not to inputs on the spec form.
+     */
+    @ExceptionHandler(CodeCompilationException.class)
+    ResponseEntity<Map<String, Object>> handleCompilation(CodeCompilationException ex) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("detail", "the agent's source does not compile");
+        body.put("compile_errors", ex.errors());
+        return ResponseEntity.badRequest().body(body);
+    }
+
+    /** Source that compiles but does not expose the entry point the studio calls. */
+    @ExceptionHandler(GraphBuildException.class)
+    ResponseEntity<Map<String, Object>> handleGraphBuild(GraphBuildException ex) {
+        return ResponseEntity.badRequest().body(Map.of("detail", ex.getMessage()));
     }
 
     @ExceptionHandler(Exception.class)

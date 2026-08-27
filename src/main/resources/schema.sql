@@ -13,3 +13,8 @@ CREATE TABLE IF NOT EXISTS agent_spec (
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_spec_created_at ON agent_spec (created_at);
+
+-- Added after the first release, so ALTER rather than a new column in the CREATE above:
+-- an existing database has already run CREATE TABLE IF NOT EXISTS and would skip it.
+ALTER TABLE agent_spec ADD COLUMN IF NOT EXISTS code           TEXT;
+ALTER TABLE agent_spec ADD COLUMN IF NOT EXISTS code_edited_at TIMESTAMPTZ;

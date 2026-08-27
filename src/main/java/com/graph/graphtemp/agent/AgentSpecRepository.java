@@ -1,5 +1,6 @@
 package com.graph.graphtemp.agent;
 
+import com.graph.graphtemp.codegen.EditedCodeStore;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -18,7 +19,7 @@ import java.util.UUID;
  * driver coupling.
  */
 @Repository
-public class AgentSpecRepository {
+public class AgentSpecRepository implements EditedCodeStore {
 
     private static final TypeReference<List<String>> TOOLS_TYPE = new TypeReference<>() {};
     private static final TypeReference<List<Step>> STEPS_TYPE = new TypeReference<>() {};
@@ -68,6 +69,32 @@ public class AgentSpecRepository {
 
     public boolean deleteById(UUID id) {
         return jdbc.update("DELETE FROM agent_spec WHERE id = ?", id) > 0;
+    }
+
+    /**
+     * The user's edited source, absent while the agent still runs on freshly generated
+     * code. Deliberately not a field of {@link AgentSpec}: the spec is the form's wire
+     * format, and a PUT from the editor would otherwise have to echo the whole file back
+     * just to avoid wiping it.
+     */
+    @Override
+    public Optional<String> findCode(UUID id) {
+        return jdbc.query("SELECT code FROM agent_spec WHERE id = ?",
+                        (ResultSet rs, int rowNum) -> rs.getString("code"), id)
+                .stream().findFirst().filter(code -> code != null && !code.isBlank());
+    }
+
+    public boolean saveCode(UUID id, String code) {
+        return jdbc.update(
+                "UPDATE agent_spec SET code = ?, code_edited_at = now(), updated_at = now() WHERE id = ?",
+                code, id) > 0;
+    }
+
+    /** Drops the edit so the next read falls back to generating from the spec. */
+    public boolean clearCode(UUID id) {
+        return jdbc.update(
+                "UPDATE agent_spec SET code = NULL, code_edited_at = NULL, updated_at = now() WHERE id = ?",
+                id) > 0;
     }
 
     private RowMapper<AgentSpec> rowMapper() {

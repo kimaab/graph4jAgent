@@ -3,9 +3,14 @@ package com.graph.graphtemp.graph;
 import com.graph.graphtemp.agent.AgentSpec;
 import com.graph.graphtemp.agent.GraphType;
 import com.graph.graphtemp.agent.Step;
+import com.graph.graphtemp.codegen.AgentSource;
+import com.graph.graphtemp.codegen.CodeGenerator;
+import com.graph.graphtemp.tools.HttpGetTool;
+import com.graph.graphtemp.tools.WebSearchTool;
 import com.graph.graphtemp.tools.CalculatorTool;
 import com.graph.graphtemp.tools.ToolRegistry;
 import org.bsc.langgraph4j.CompiledGraph;
+import org.bsc.langgraph4j.prebuilt.MessagesState;
 import org.bsc.langgraph4j.RunnableConfig;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -25,12 +30,27 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.bsc.langgraph4j.prebuilt.MessagesState.MESSAGES_STATE;
 
-class GraphBuilderTest {
+class AgentGraphsTest {
 
     private static final JsonMapper MAPPER = JsonMapper.builder().build();
 
     private static ToolRegistry registry() {
-        return new ToolRegistry(List.of(new CalculatorTool(MAPPER)), MAPPER);
+        return new ToolRegistry(
+                List.of(new CalculatorTool(MAPPER), new HttpGetTool(MAPPER), new WebSearchTool(MAPPER)),
+                MAPPER);
+    }
+
+    /**
+     * The real path a run takes: render the spec to Java, compile it, load it, call its
+     * entry point. Nothing here shortcuts to a hand-built graph, because in production
+     * nothing does.
+     */
+    private static AgentGraphs graphs(StubChatModel model) {
+        CodeGenerator generator =
+                new CodeGenerator(registry(), "http://gateway.example/v1", "test-key");
+        // No stored edit: every spec here runs on freshly generated code.
+        AgentSource source = new AgentSource(id -> Optional.empty(), generator);
+        return new AgentGraphs(model, source, new AgentCodeCompiler());
     }
 
     private static AgentSpec spec(GraphType type, List<String> tools, List<Step> steps) {
@@ -38,7 +58,8 @@ class GraphBuilderTest {
                 "you are a test", tools, type, steps, 10);
     }
 
-    private static Optional<AgentGraphState> run(CompiledGraph<AgentGraphState> graph, String input) {
+    private static Optional<MessagesState<Message>> run(
+            CompiledGraph<MessagesState<Message>> graph, String input) {
         return graph.invoke(
                 Map.of(MESSAGES_STATE, new UserMessage(input)),
                 RunnableConfig.builder().threadId("t-" + UUID.randomUUID()).build());
@@ -55,9 +76,9 @@ class GraphBuilderTest {
         AssistantMessage finalAnswer = new AssistantMessage("정답은 14입니다");
 
         StubChatModel model = new StubChatModel(List.of(wantsTool, finalAnswer));
-        GraphBuilder builder = new GraphBuilder(model, registry());
+        AgentGraphs builder = graphs(model);
 
-        Optional<AgentGraphState> result =
+        Optional<MessagesState<Message>> result =
                 run(builder.build(spec(GraphType.REACT, List.of("calculator"), List.of())), "(3+4)*2 는?");
 
         assertThat(result).isPresent();
@@ -83,9 +104,9 @@ class GraphBuilderTest {
     @DisplayName("react: 툴 호출이 없으면 첫 응답에서 바로 끝난다")
     void reactStopsWhenNoToolCall() {
         StubChatModel model = StubChatModel.replying("바로 답합니다");
-        GraphBuilder builder = new GraphBuilder(model, registry());
+        AgentGraphs builder = graphs(model);
 
-        Optional<AgentGraphState> result =
+        Optional<MessagesState<Message>> result =
                 run(builder.build(spec(GraphType.REACT, List.of("calculator"), List.of())), "안녕");
 
         assertThat(result).isPresent();
@@ -97,13 +118,13 @@ class GraphBuilderTest {
     @DisplayName("linear: steps 를 순서대로 실행하고 각 단계가 이전 출력을 이어받는다")
     void linearChainsStepsInOrder() {
         StubChatModel model = StubChatModel.replying("추출 결과", "압축 결과");
-        GraphBuilder builder = new GraphBuilder(model, registry());
+        AgentGraphs builder = graphs(model);
 
         AgentSpec spec = spec(GraphType.LINEAR, List.of(), List.of(
                 new Step("추출", "핵심 문장을 뽑아라"),
                 new Step("압축", "3문장으로 줄여라")));
 
-        Optional<AgentGraphState> result = run(builder.build(spec), "원문입니다");
+        Optional<MessagesState<Message>> result = run(builder.build(spec), "원문입니다");
 
         assertThat(result).isPresent();
         assertThat(model.callCount()).isEqualTo(2);
@@ -120,7 +141,7 @@ class GraphBuilderTest {
     @DisplayName("linear: 시스템 프롬프트가 매 스텝의 첫 메시지로 들어간다")
     void linearPassesSystemPrompt() {
         StubChatModel model = StubChatModel.replying("a", "b");
-        GraphBuilder builder = new GraphBuilder(model, registry());
+        AgentGraphs builder = graphs(model);
 
         AgentSpec spec = spec(GraphType.LINEAR, List.of(), List.of(
                 new Step("one", "p1"), new Step("two", "p2")));
@@ -133,10 +154,10 @@ class GraphBuilderTest {
     @Test
     @DisplayName("같은 스펙은 그래프를 재사용하고, 스펙이 바뀌면 새로 빌드한다")
     void cachesOnSpecContent() {
-        GraphBuilder builder = new GraphBuilder(StubChatModel.replying("x"), registry());
+        AgentGraphs builder = graphs(StubChatModel.replying("x"));
         AgentSpec original = spec(GraphType.REACT, List.of("calculator"), List.of());
 
-        CompiledGraph<AgentGraphState> first = builder.build(original);
+        CompiledGraph<MessagesState<Message>> first = builder.build(original);
         assertThat(builder.build(original)).isSameAs(first);
 
         AgentSpec edited = new AgentSpec(original.id(), original.name(), original.description(),
@@ -158,11 +179,11 @@ class GraphBuilderTest {
                         .build())
                 .toList();
         StubChatModel model = new StubChatModel(runaway);
+        AgentGraphs builder = graphs(model);
 
         AgentSpec spec = new AgentSpec(UUID.randomUUID(), "runaway", "", "test-model",
                 "", List.of("calculator"), GraphType.REACT, List.of(), 2);
-        GraphBuilder builder = new GraphBuilder(model, registry());
-        CompiledGraph<AgentGraphState> graph = builder.build(spec);
+        CompiledGraph<MessagesState<Message>> graph = builder.build(spec);
 
         assertThatThrownBy(() -> run(graph, "돌아라"))
                 .hasRootCauseInstanceOf(IllegalStateException.class)
@@ -175,7 +196,7 @@ class GraphBuilderTest {
     @Test
     @DisplayName("알 수 없는 툴 이름은 그래프 빌드 시점에 거부된다")
     void rejectsUnknownTool() {
-        GraphBuilder builder = new GraphBuilder(StubChatModel.replying("x"), registry());
+        AgentGraphs builder = graphs(StubChatModel.replying("x"));
         AgentSpec spec = spec(GraphType.REACT, List.of("nope"), List.of());
 
         assertThat(org.junit.jupiter.api.Assertions.assertThrows(
