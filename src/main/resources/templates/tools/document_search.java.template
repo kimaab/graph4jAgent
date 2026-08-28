@@ -1,0 +1,144 @@
+    /**
+     * Searches this agent's uploaded PDFs, which the studio stored a page at a time.
+     * <p>
+     * Two passes. Postgres full-text search ranks first: it is indexed and it handles
+     * English well. It also misses Korean whenever a particle is attached — the corpus
+     * holds "스프링을" while the query says "스프링", and those are different lexemes —
+     * so a substring pass catches what the index cannot. The second pass only runs when
+     * the first finds nothing, so the common case stays on the index.
+     */
+    static final class DocumentSearch extends Tool {
+
+        /** Enough passages to answer from, few enough to leave room for the answer. */
+        private static final int MAX_HITS = 5;
+
+        DocumentSearch() {
+            super("document_search",
+                    "Search the PDF documents attached to this agent. "
+                            + "Returns matching passages with the file name and page number.",
+                    "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},"
+                            + "\"required\":[\"query\"]}");
+        }
+
+        @Override
+        public String call(String toolInput) {
+            String query = field(toolInput, "query");
+            if (query == null || query.isBlank()) {
+                return "error: 'query' is required";
+            }
+
+            try (java.sql.Connection connection =
+                         java.sql.DriverManager.getConnection(DB_URL, DB_USERNAME, DB_PASSWORD)) {
+
+                String found = ranked(connection, query);
+                if (found.isEmpty()) {
+                    found = substring(connection, query);
+                }
+                return found.isEmpty()
+                        ? "No passage in the attached documents matches: " + query
+                        : found;
+
+            } catch (java.sql.SQLException e) {
+                return "error: could not reach the document store: " + e.getMessage();
+            }
+        }
+
+        /** Full-text pass, ordered by rank, with Postgres building the excerpt. */
+        private String ranked(java.sql.Connection connection, String query)
+                throws java.sql.SQLException {
+            String sql = """
+                    SELECT d.filename, p.page_number,
+                           ts_headline('simple', p.content,
+                                       plainto_tsquery('simple', ?),
+                                       -- The quotes are required: bare "StartSel=," makes
+                                       -- Postgres read ",StopSel=" as the marker itself.
+                                       'MaxWords=60,MinWords=25,StartSel="",StopSel=""') AS excerpt
+                      FROM agent_document_page p
+                      JOIN agent_document d ON d.id = p.document_id
+                     WHERE d.agent_id = ?::uuid
+                       AND p.search_vector @@ plainto_tsquery('simple', ?)
+                     ORDER BY ts_rank(p.search_vector, plainto_tsquery('simple', ?)) DESC
+                     LIMIT ?""";
+            try (java.sql.PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, query);
+                statement.setString(2, AGENT_ID);
+                statement.setString(3, query);
+                statement.setString(4, query);
+                statement.setInt(5, MAX_HITS);
+                return render(statement);
+            }
+        }
+
+        /**
+         * Substring pass, term by term. It sees inside a Korean word, which the index
+         * cannot, and it scores pages by how many of the query's words they contain —
+         * a model asks "Nimbus 의 내부 코드명이 뭐야?", and no page holds that whole
+         * phrase, but the page that holds three of its words is the answer.
+         */
+        private String substring(java.sql.Connection connection, String query)
+                throws java.sql.SQLException {
+            List<String> terms = terms(query);
+            if (terms.isEmpty()) {
+                return "";
+            }
+
+            // One ILIKE per term, OR'd for matching and summed for ranking.
+            StringBuilder matches = new StringBuilder();
+            StringBuilder score = new StringBuilder();
+            for (int i = 0; i < terms.size(); i++) {
+                matches.append(i == 0 ? "" : " OR ").append("p.content ILIKE ?");
+                score.append(i == 0 ? "" : " + ")
+                        .append("(CASE WHEN p.content ILIKE ? THEN 1 ELSE 0 END)");
+            }
+
+            String sql = "SELECT d.filename, p.page_number, left(p.content, 400) AS excerpt"
+                    + " FROM agent_document_page p"
+                    + " JOIN agent_document d ON d.id = p.document_id"
+                    + " WHERE d.agent_id = ?::uuid AND (" + matches + ")"
+                    + " ORDER BY (" + score + ") DESC, d.filename, p.page_number"
+                    + " LIMIT ?";
+
+            try (java.sql.PreparedStatement statement = connection.prepareStatement(sql)) {
+                int at = 1;
+                statement.setString(at++, AGENT_ID);
+                for (String term : terms) {
+                    statement.setString(at++, "%" + term + "%");
+                }
+                for (String term : terms) {
+                    statement.setString(at++, "%" + term + "%");
+                }
+                statement.setInt(at, MAX_HITS);
+                return render(statement);
+            }
+        }
+
+        /**
+         * Splits a question into words worth matching. One-character words are dropped:
+         * in Korean those are mostly particles, and they match almost every page.
+         */
+        private static List<String> terms(String query) {
+            List<String> terms = new ArrayList<>();
+            for (String word : query.trim().split("\\s+")) {
+                String cleaned = word.replaceAll("[?!.,;:'\"()\\[\\]]", "");
+                if (cleaned.length() > 1 && !terms.contains(cleaned)) {
+                    terms.add(cleaned);
+                }
+            }
+            return terms;
+        }
+
+        private String render(java.sql.PreparedStatement statement) throws java.sql.SQLException {
+            StringBuilder out = new StringBuilder();
+            try (java.sql.ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    if (!out.isEmpty()) {
+                        out.append("\n\n");
+                    }
+                    out.append("[").append(rows.getString("filename"))
+                            .append(" p.").append(rows.getInt("page_number")).append("]\n")
+                            .append(rows.getString("excerpt").replaceAll("\\s+", " ").strip());
+                }
+            }
+            return out.toString();
+        }
+    }
