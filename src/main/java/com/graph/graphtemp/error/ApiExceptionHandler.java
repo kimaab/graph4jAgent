@@ -2,6 +2,7 @@ package com.graph.graphtemp.error;
 
 import com.graph.graphtemp.graph.CodeCompilationException;
 import com.graph.graphtemp.graph.GraphBuildException;
+import org.springframework.beans.factory.annotation.Value;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -12,6 +13,8 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.MultipartException;
 import tools.jackson.core.JacksonException;
 
 import java.util.LinkedHashMap;
@@ -31,6 +34,13 @@ public class ApiExceptionHandler {
 
     /** @AssertTrue methods report under their property name; map them back to the real field. */
     private static final Map<String, String> FIELD_ALIASES = Map.of("stepsConsistent", "steps");
+
+    /** Quoted back to the client so the message names the limit it actually hit. */
+    private final String maxFileSize;
+
+    ApiExceptionHandler(@Value("${spring.servlet.multipart.max-file-size:1MB}") String maxFileSize) {
+        this.maxFileSize = maxFileSize;
+    }
 
     @ExceptionHandler(ApiException.class)
     ResponseEntity<Map<String, Object>> handleApi(ApiException ex) {
@@ -95,6 +105,24 @@ public class ApiExceptionHandler {
     @ExceptionHandler(GraphBuildException.class)
     ResponseEntity<Map<String, Object>> handleGraphBuild(GraphBuildException ex) {
         return ResponseEntity.badRequest().body(Map.of("detail", ex.getMessage()));
+    }
+
+    /**
+     * Tomcat rejects an oversized upload before any controller runs, so a size check in
+     * the controller never sees it. Without this the client got a 500 naming a Spring
+     * class; the limit is something the user can act on, so say what it is.
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    ResponseEntity<Map<String, Object>> handleTooLarge(MaxUploadSizeExceededException ex) {
+        return ResponseEntity.status(HttpStatus.CONTENT_TOO_LARGE)
+                .body(Map.of("detail", "the file is larger than the " + maxFileSize + " upload limit"));
+    }
+
+    /** A malformed or truncated multipart body is the caller's problem, not a 500. */
+    @ExceptionHandler(MultipartException.class)
+    ResponseEntity<Map<String, Object>> handleMultipart(MultipartException ex) {
+        return ResponseEntity.badRequest()
+                .body(Map.of("detail", "could not read the uploaded file: " + ex.getMessage()));
     }
 
     @ExceptionHandler(Exception.class)

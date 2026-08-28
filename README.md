@@ -11,7 +11,7 @@
 
 | | |
 |---|---|
-| 백엔드 | Java 21 · Spring Boot 4.1.1 · langgraph4j 1.8.24 · Spring AI 2.0.1 |
+| 백엔드 | Java 21 · Spring Boot 4.1.1 · langgraph4j 1.8.24 · Spring AI 2.0.1 · PDFBox 3.0.3 |
 | 프론트 | Next.js 16 (App Router) · TypeScript · Tailwind CSS · axios · zustand |
 | DB | PostgreSQL (스펙 저장) |
 | 모델 | OpenAI 호환 게이트웨이 (vLLM) |
@@ -38,6 +38,8 @@
 |---|---|---|
 | `DB_HOST` / `DB_PORT` / `DB_NAME` | `192.168.105.3` / `5432` / `postgres` | PostgreSQL |
 | `DB_USERNAME` / `DB_PASSWORD` | `postgres` / — | 접속 계정 |
+| `UPLOAD_MAX_FILE_SIZE` | `20MB` | PDF 한 개 최대 크기 |
+| `UPLOAD_MAX_REQUEST_SIZE` | `25MB` | 요청 전체 최대 크기 (멀티파트 봉투 여유분 포함) |
 | `LLM_BASE_URL` | `http://192.168.109.254:32609/v1` | **`/v1`까지 포함해야 합니다** (아래 함정 참고) |
 | `LLM_API_KEY` | `test_api_key` | 게이트웨이 키 |
 | `LLM_MODEL` | `google/gemma-4-31B-it` | 새 에이전트의 기본 모델 |
@@ -81,7 +83,7 @@ npm run dev
 | 경로 | 하는 일 |
 |---|---|
 | `/agents` | 목록, 생성, 삭제 |
-| `/agents/{id}` | 에디터. 좌측 폼(이름·모델·시스템 프롬프트·그래프 종류), 우측 툴 체크박스와 `linear` 단계 편집. 「코드 보기」 탭에서 생성 코드 확인 |
+| `/agents/{id}` | 에디터. 좌측 폼(이름·모델·시스템 프롬프트·그래프 종류), 우측 툴 체크박스·PDF 첨부·`linear` 단계 편집. 「코드 보기」 탭에서 **소스를 직접 수정**하고 저장 |
 | `/agents/{id}/run` | 채팅 테스트. 토큰 스트리밍, 툴 호출은 접을 수 있는 블록. `thread_id`는 진입 시 생성되고 「새 대화」로 갱신 |
 
 저장 시 서버 검증 실패는 **필드별로** 해당 입력 아래에 표시됩니다.
@@ -115,7 +117,31 @@ npm run dev
 - **react** — `agent` 노드가 모델을 호출하고, 툴 호출이 있으면 `tools` 노드가 실행한 뒤 다시 `agent`로 돌아옵니다. `max_iterations`가 이 루프의 상한입니다.
 - **linear** — `steps`를 순서대로 실행합니다. 각 단계는 이전 단계들의 출력을 프롬프트에 이어받습니다. 루프가 없어 툴을 쓰지 않습니다.
 
-컴파일된 그래프는 **스펙 내용 기준으로 캐시**됩니다. 스펙을 고치면 다음 실행에서 자동으로 다시 만들어집니다.
+### 실행되는 것은 「코드 보기」에 있는 그 파일입니다
+
+스펙에서 그래프를 직접 조립하던 `GraphBuilder` 는 없앴습니다. 실행할 때마다 서버는
+
+1. 저장된 편집본이 있으면 그것을, 없으면 스펙으로 소스를 렌더하고
+2. `JavaCompiler` 로 **메모리에서 컴파일**한 뒤 (서버 자신의 클래스패스에 대고)
+3. 생성 클래스의 `static CompiledGraph<State> buildGraph(ChatModel, boolean)` 을 **반사로** 호출합니다
+
+공유 인터페이스를 쓰지 않고 반사를 쓰는 이유는, 그 인터페이스가 클래스패스에 없는
+JBang 독립 실행을 깨뜨리지 않기 위해서입니다.
+
+경로가 하나뿐이라 내보낸 파일과 스튜디오가 어긋날 수 없습니다. 컴파일 결과는 **소스 다이제스트
+기준으로 캐시**되고, 코드를 고치면 새 그래프가 되므로 대화는 초기화됩니다.
+
+컴파일이 실패하면 javac 진단이 `compile_errors` 로 400 응답에 실려 코드 탭에 그대로 뜹니다.
+
+> **생성 코드가 import 하는 라이브러리는 전부 서버의 런타임 의존성이어야 합니다.**
+> 서버가 자기 클래스패스에 대고 컴파일하기 때문입니다 — 서버 자신은 절대 호출하지 않는
+> `openai-java-client-okhttp` 같은 것도 포함입니다. 이게 `test` 스코프였을 때 테스트는
+> 전부 통과하는데 실제 실행은 전부 컴파일 실패했습니다. 테스트는 test 스코프 jar를
+> 클래스패스에 두고 돌지만 서버는 아니기 때문입니다.
+> 부팅 시 `StartupCompileCheck` 가 빈 에이전트를 한 번 컴파일해서 이걸 즉시 잡습니다.
+
+> 서버에 **JDK가 필요합니다** (JRE 아님). 그리고 `java.class.path` 가 실제 클래스패스여야 하므로
+> **Spring Boot fat jar 로 패키징하면 동작하지 않습니다** — jar 안의 `BOOT-INF/lib` 을 javac가 못 봅니다.
 
 ### 내장 툴
 
@@ -124,6 +150,18 @@ npm run dev
 | `calculator` | 사칙연산·괄호·단항부호. **직접 짠 재귀하강 파서**를 씁니다 — 스크립트 엔진을 쓰면 모델에게 임의 코드 실행을 넘겨주게 됩니다 |
 | `http_get` | http(s) URL 본문을 텍스트로. 10초 타임아웃, 8000자 절단 |
 | `web_search` | 스텁. 인터페이스는 진짜고 본문만 "미연결" 응답을 돌려줍니다 |
+| `document_search` | 에이전트에 첨부한 PDF에서 검색. 파일명과 **페이지 번호**를 붙여 발췌를 돌려줍니다 |
+
+**툴 추가하는 법** — 클래스 하나와 템플릿 하나면 끝입니다. 등록할 곳은 없습니다.
+
+1. `tools/XxxTool.java` 를 `BuiltinTool` 상속으로 만들고 `@Component` 를 붙입니다
+2. `templates/tools/{이름}.java.template` 에 독립 실행판을 씁니다
+3. 끝. `ToolRegistry` 가 Spring 빈으로 자동 수집하고, 생성자 표현식과 템플릿 경로는
+   이름 규칙에서 유도됩니다 (`CalculatorTool` → `tools/calculator.java.template` → `new Calculator()`)
+
+규칙을 벗어나야 하면 `codegenClassName()` / `codegenTemplate()` / `codegenConstructor()` 를
+재정의하고, 툴이 별도 라이브러리를 쓰면 `codegenDependencies()` 로 `//DEPS` 줄을 요청합니다.
+템플릿을 빠뜨리면 **부팅이 실패합니다** — 예전엔 그 툴을 쓴 에이전트를 내보낼 때서야 400이 났습니다.
 
 ---
 
@@ -137,7 +175,12 @@ npm run dev
 | `PUT` | `/api/agents/{id}` | 수정 |
 | `DELETE` | `/api/agents/{id}` | 삭제 (204) |
 | `POST` | `/api/agents/{id}/run` | 실행, **SSE 스트리밍** |
-| `GET` | `/api/agents/{id}/code` | 생성된 Java 코드 (text/plain) |
+| `GET` | `/api/agents/{id}/code` | 에이전트 소스 (text/plain). `X-Code-Edited` 헤더로 편집본인지 표시 |
+| `PUT` | `/api/agents/{id}/code` | 소스 저장. 이후로는 이 코드가 실행됩니다 |
+| `POST` | `/api/agents/{id}/code/regenerate` | 편집을 버리고 정의에서 다시 생성 |
+| `GET` | `/api/agents/{id}/documents` | 첨부 문서 목록 |
+| `POST` | `/api/agents/{id}/documents` | PDF 업로드 (multipart, `file`). 업로드 시점에 텍스트 추출 |
+| `DELETE` | `/api/agents/{id}/documents/{docId}` | 삭제 (204) |
 | `GET` | `/api/tools` | 내장 툴 목록 (이름·설명·파라미터 스키마) |
 
 에러는 전부 `{"detail": "..."}` 형태입니다. 폼이 고칠 수 있는 검증 실패는 `errors` 맵이 함께 옵니다:
@@ -291,6 +334,20 @@ $r = Invoke-RestMethod $url; foreach ($a in $r) { $a.id }   # 정상
 **대화 상태는 인메모리입니다.** 재시작하면 모든 thread가 사라집니다. 유지가 필요하면
 `langgraph4j-postgres-saver`로 교체하면 됩니다 — 이미 PostgreSQL을 쓰고 있어 크게 어렵지 않습니다.
 
+**Postgres `ts_headline` 에서 빈 마커는 따옴표가 필요합니다.** `StartSel=,StopSel=` 이라고 쓰면
+Postgres가 `,StopSel=` 을 StartSel 의 *값* 으로 읽어서, 발췌문 안에 그 문자열이 그대로 박히고
+종료 마커는 기본값 `</b>` 가 남습니다. `StartSel="",StopSel=""` 이 맞습니다.
+
+**한글은 전문검색이 조사에서 놓칩니다.** `to_tsvector('simple', ...)` 는 공백으로만 자르므로
+`스프링을` 과 `스프링` 은 다른 렉심입니다. `document_search` 가 전문검색으로 먼저 랭킹하고
+결과가 없을 때만 `ILIKE` 로 다시 훑는 2단 구조인 이유입니다.
+
+**업로드 한도는 컨트롤러가 아니라 컨테이너가 정합니다.** Spring Boot 기본값은 파일당 **1MB**라
+평범한 PDF도 거부됩니다. Tomcat이 컨트롤러 진입 **전에** 잘라내므로 컨트롤러 안의 크기 검사는
+절대 실행되지 않습니다 — `spring.servlet.multipart.max-file-size` 가 유일한 진실입니다.
+초과분은 `MaxUploadSizeExceededException` 으로 오고, 처리하지 않으면 클래스명이 그대로 노출되는
+500이 됩니다.
+
 **Spring AI 2.0에는 `internalToolExecutionEnabled`가 없습니다.** `ChatModel.call()`이 툴을
 자동 실행하지 않으므로, 모델 옵션에 콜백만 붙이면 그래프가 루프를 제어합니다.
 
@@ -301,8 +358,13 @@ $r = Invoke-RestMethod $url; foreach ($a in $r) { $a.id }   # 정상
 - **Docker / docker-compose** — 미포함. 구성한다면 백엔드 `8080`, 프론트 `3000`을 열고
   위 표의 환경변수를 넘기면 됩니다. 컨테이너에서 PostgreSQL과 LLM 게이트웨이(둘 다 사설 IP)에
   닿을 수 있도록 네트워크를 잡아야 합니다.
-- `web_search` 실제 백엔드 연결
-- 인증/인가 — 현재 API는 무인증입니다
+- `web_search` 실제 백엔드 연결 — DuckDuckGo HTML 엔드포인트는 요청 서너 번 만에
+  이미지 CAPTCHA를 내밉니다. 검색 API 키(Brave/Tavily 등)를 받는 쪽이 유일하게 안정적입니다
+- 인증/인가 — 현재 API는 무인증입니다. **코드 편집은 서버 JVM에서 임의 코드를 실행하는
+  것과 같으므로**, 외부에 노출할 계획이라면 인증이 먼저 와야 합니다
+- PDF 외 형식 (docx, txt 등)
+- 의미 검색 — 지금 `document_search` 는 키워드 기반입니다
+- 스캔 PDF의 OCR — 텍스트 레이어가 없으면 업로드가 거부됩니다
 - 대화 이력 영속화
 
 ---

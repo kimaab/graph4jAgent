@@ -47,7 +47,8 @@ class AgentGraphsTest {
      */
     private static AgentGraphs graphs(StubChatModel model) {
         CodeGenerator generator =
-                new CodeGenerator(registry(), "http://gateway.example/v1", "test-key");
+                new CodeGenerator(registry(), "http://gateway.example/v1", "test-key",
+                "jdbc:postgresql://db.example:5432/postgres", "postgres", "secret");
         // No stored edit: every spec here runs on freshly generated code.
         AgentSource source = new AgentSource(id -> Optional.empty(), generator);
         return new AgentGraphs(model, source, new AgentCodeCompiler());

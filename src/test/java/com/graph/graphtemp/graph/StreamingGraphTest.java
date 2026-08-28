@@ -44,7 +44,8 @@ class StreamingGraphTest {
     /** Same path production takes: generate the source, compile it, run what came out. */
     private static AgentGraphs graphs(StubChatModel model) {
         CodeGenerator generator =
-                new CodeGenerator(registry(), "http://gateway.example/v1", "test-key");
+                new CodeGenerator(registry(), "http://gateway.example/v1", "test-key",
+                "jdbc:postgresql://db.example:5432/postgres", "postgres", "secret");
         return new AgentGraphs(model, new AgentSource(id -> Optional.empty(), generator),
                 new AgentCodeCompiler());
     }

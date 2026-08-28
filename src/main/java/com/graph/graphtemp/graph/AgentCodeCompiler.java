@@ -39,6 +39,9 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 public class AgentCodeCompiler {
 
+    /** Set this when the launcher hides the real classpath from java.class.path. */
+    static final String CLASSPATH_OVERRIDE = "agent.compile-classpath";
+
     private final Map<String, Class<?>> cache = new ConcurrentHashMap<>();
 
     /** @param digest identifies the source; see {@code AgentSource}. */
@@ -63,7 +66,7 @@ public class AgentCodeCompiler {
              InMemoryFileManager files = new InMemoryFileManager(standard, classes)) {
 
             boolean ok = compiler.getTask(null, files, diagnostics,
-                    List.of("-classpath", System.getProperty("java.class.path")),
+                    List.of("-classpath", classpath()),
                     null,
                     List.of(new SourceFile(className, source))).call();
 
@@ -88,6 +91,33 @@ public class AgentCodeCompiler {
                             + "; the public class must match the agent's name",
                     List.of());
         }
+    }
+
+    /**
+     * What javac compiles the agent against: this server's own classpath, so the studio
+     * and the exported file share one langgraph4j and one Spring AI.
+     * <p>
+     * {@code java.class.path} can be empty — a launcher that shortens a long classpath,
+     * or a module-path launch, leaves it unset. Reading it blindly used to produce a
+     * {@code NullPointerException} with no message from {@code List.of}, which said
+     * nothing about the real problem. {@code agent.compile-classpath} is the escape
+     * hatch when the launcher hides it.
+     */
+    private static String classpath() {
+        String override = System.getProperty(CLASSPATH_OVERRIDE);
+        if (override != null && !override.isBlank()) {
+            return override;
+        }
+        String property = System.getProperty("java.class.path");
+        if (property != null && !property.isBlank()) {
+            return property;
+        }
+        throw new CodeCompilationException(
+                "the server cannot tell what its own classpath is, so it cannot compile the "
+                        + "agent. This happens when the JVM is launched with a shortened or "
+                        + "module-only classpath. Set -D" + CLASSPATH_OVERRIDE + "=<classpath> "
+                        + "to point the compiler at the same jars this server runs on",
+                List.of());
     }
 
     private static List<String> errors(DiagnosticCollector<JavaFileObject> diagnostics) {

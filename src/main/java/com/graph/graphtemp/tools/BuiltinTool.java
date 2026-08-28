@@ -3,6 +3,8 @@ package com.graph.graphtemp.tools;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
 
+import java.util.List;
+
 /**
  * A tool the server ships with. Implementations stay pure functions of their JSON
  * argument string so the generated standalone file can mirror them.
@@ -58,5 +60,14 @@ public abstract class BuiltinTool implements ToolCallback {
     /** The expression the generated file uses to build this tool. */
     public String codegenConstructor() {
         return "new " + codegenClassName() + "()";
+    }
+
+    /**
+     * Extra {@code //DEPS} coordinates the generated file needs because of this tool,
+     * as {@code group:artifact:version}. Most tools need nothing beyond what the agent
+     * already pulls in; a tool that reaches a database or parses a format does.
+     */
+    public List<String> codegenDependencies() {
+        return List.of();
     }
 }

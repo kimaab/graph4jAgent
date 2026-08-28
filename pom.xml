@@ -76,14 +76,25 @@
             <scope>runtime</scope>
         </dependency>
 
-        <!-- Only the generated standalone agent needs this; the server gets its client
-             from Spring AI autoconfiguration. Test scope so CodeGeneratorCompileTest can
-             compile the emitted source. -->
+        <!-- Extracts page text from uploaded PDFs. Only the upload path needs it: the
+             search tool reads text back out of the database, so an exported agent does
+             not carry a PDF parser. -->
+        <dependency>
+            <groupId>org.apache.pdfbox</groupId>
+            <artifactId>pdfbox</artifactId>
+            <version>3.0.3</version>
+        </dependency>
+
+        <!-- The generated agent imports this to build its own client in main().
+             It must stay at compile scope even though the server never calls it:
+             the server COMPILES the generated file at runtime, against its own
+             classpath, so anything the generated source imports has to be there.
+             It was test-scoped until the runtime compiler arrived, and the whole
+             suite still passed while every real run failed to compile. -->
         <dependency>
             <groupId>com.openai</groupId>
             <artifactId>openai-java-client-okhttp</artifactId>
             <version>4.49.0</version>
-            <scope>test</scope>
         </dependency>
 
         <dependency>

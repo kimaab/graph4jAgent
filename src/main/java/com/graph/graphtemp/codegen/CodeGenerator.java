@@ -36,13 +36,24 @@ public class CodeGenerator {
     private final ToolRegistry toolRegistry;
     private final String baseUrl;
     private final String apiKey;
+    // Baked into the generated file as defaults so a tool that reads the studio's
+    // database still works when the agent is exported and run elsewhere.
+    private final String dbUrl;
+    private final String dbUsername;
+    private final String dbPassword;
 
     public CodeGenerator(ToolRegistry toolRegistry,
-                  @Value("${spring.ai.openai.base-url}") String baseUrl,
-                  @Value("${spring.ai.openai.api-key}") String apiKey) {
+                         @Value("${spring.ai.openai.base-url}") String baseUrl,
+                         @Value("${spring.ai.openai.api-key}") String apiKey,
+                         @Value("${spring.datasource.url:}") String dbUrl,
+                         @Value("${spring.datasource.username:}") String dbUsername,
+                         @Value("${spring.datasource.password:}") String dbPassword) {
         this.toolRegistry = toolRegistry;
         this.baseUrl = baseUrl;
         this.apiKey = apiKey;
+        this.dbUrl = dbUrl;
+        this.dbUsername = dbUsername;
+        this.dbPassword = dbPassword;
     }
 
     /**
@@ -78,6 +89,11 @@ public class CodeGenerator {
                 .replace("__MODEL__", escape(spec.model()))
                 .replace("__SYSTEM_PROMPT__", javaString(spec.systemPrompt()))
                 .replace("__MAX_ITERATIONS__", String.valueOf(spec.maxIterations()))
+                .replace("__AGENT_ID_LITERAL__", javaString(String.valueOf(spec.id())))
+                .replace("__DB_URL__", escape(dbUrl))
+                .replace("__DB_USERNAME__", escape(dbUsername))
+                .replace("__DB_PASSWORD__", escape(dbPassword))
+                .replace("__TOOL_DEPS__", toolDeps(tools))
                 .replace("__GRAPH_BUILDER__", graphBuilder(spec))
                 .replace("__TOOL_CLASSES__", toolClasses(tools))
                 .replace("__TOOL_INSTANCES__", toolInstances(tools));
@@ -105,6 +121,15 @@ public class CodeGenerator {
     private String toolClasses(List<BuiltinTool> tools) {
         return tools.stream()
                 .map(tool -> template(tool.codegenTemplate()))
+                .collect(Collectors.joining("\n"));
+    }
+
+    /** One //DEPS line per extra coordinate a selected tool asks for, de-duplicated. */
+    private static String toolDeps(List<BuiltinTool> tools) {
+        return tools.stream()
+                .flatMap(tool -> tool.codegenDependencies().stream())
+                .distinct()
+                .map(coordinate -> "//DEPS " + coordinate)
                 .collect(Collectors.joining("\n"));
     }
 

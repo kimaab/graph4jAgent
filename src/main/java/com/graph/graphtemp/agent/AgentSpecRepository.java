@@ -79,9 +79,23 @@ public class AgentSpecRepository implements EditedCodeStore {
      */
     @Override
     public Optional<String> findCode(UUID id) {
-        return jdbc.query("SELECT code FROM agent_spec WHERE id = ?",
-                        (ResultSet rs, int rowNum) -> rs.getString("code"), id)
-                .stream().findFirst().filter(code -> code != null && !code.isBlank());
+        return firstUsable(jdbc.query("SELECT code FROM agent_spec WHERE id = ?",
+                (ResultSet rs, int rowNum) -> rs.getString("code"), id));
+    }
+
+    /**
+     * Picks the stored source out of what the query returned, or nothing.
+     * <p>
+     * Order matters and is the whole point of pulling this out where a test can reach
+     * it: an agent nobody has edited has a NULL {@code code}, so the query hands back a
+     * list holding one null. Calling {@code findFirst()} before filtering throws a
+     * message-less {@link NullPointerException} on that null, which is what every agent
+     * in the database did until this was fixed.
+     */
+    static Optional<String> firstUsable(List<String> rows) {
+        return rows.stream()
+                .filter(code -> code != null && !code.isBlank())
+                .findFirst();
     }
 
     public boolean saveCode(UUID id, String code) {

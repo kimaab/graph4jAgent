@@ -16,6 +16,14 @@ spring:
       mode: always
       continue-on-error: false
 
+  servlet:
+    multipart:
+      # Tomcat enforces these before any controller runs, and the defaults (1MB per
+      # file) reject an ordinary PDF. The request cap sits above the file cap to leave
+      # room for the multipart envelope.
+      max-file-size: ${UPLOAD_MAX_FILE_SIZE:20MB}
+      max-request-size: ${UPLOAD_MAX_REQUEST_SIZE:25MB}
+
   ai:
     openai:
       # Spring AI 2.0's OpenAI module runs on the official openai-java SDK, whose

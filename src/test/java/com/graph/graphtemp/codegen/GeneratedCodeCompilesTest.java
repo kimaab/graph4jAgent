@@ -4,6 +4,7 @@ import com.graph.graphtemp.agent.AgentSpec;
 import com.graph.graphtemp.agent.GraphType;
 import com.graph.graphtemp.agent.Step;
 import com.graph.graphtemp.tools.CalculatorTool;
+import com.graph.graphtemp.tools.DocumentSearchTool;
 import com.graph.graphtemp.tools.HttpGetTool;
 import com.graph.graphtemp.tools.ToolRegistry;
 import com.graph.graphtemp.tools.WebSearchTool;
@@ -42,9 +43,11 @@ class GeneratedCodeCompilesTest {
 
     private static CodeGenerator generator() {
         ToolRegistry registry = new ToolRegistry(
-                List.of(new CalculatorTool(MAPPER), new HttpGetTool(MAPPER), new WebSearchTool(MAPPER)),
+                List.of(new CalculatorTool(MAPPER), new HttpGetTool(MAPPER), new WebSearchTool(MAPPER),
+                        new DocumentSearchTool()),
                 MAPPER);
-        return new CodeGenerator(registry, "http://gateway.example/v1", "test-key");
+        return new CodeGenerator(registry, "http://gateway.example/v1", "test-key",
+                "jdbc:postgresql://db.example:5432/postgres", "postgres", "secret");
     }
 
     @Test
@@ -56,6 +59,23 @@ class GeneratedCodeCompilesTest {
                 GraphType.REACT, List.of(), 5);
 
         assertCompiles(dir, "CalcBot.java", generator().generate(spec));
+    }
+
+    @Test
+    @DisplayName("document_search 를 쓰는 에이전트가 컴파일되고 툴이 요구한 //DEPS 가 붙는다")
+    void documentSearchAgentCompiles(@TempDir Path dir) throws IOException {
+        AgentSpec spec = new AgentSpec(UUID.randomUUID(), "doc bot", "", "test-model",
+                "첨부된 문서에서 근거를 찾아 답하라.", List.of("document_search"),
+                GraphType.REACT, List.of(), 5);
+
+        String source = generator().generate(spec);
+
+        // The tool asks for the JDBC driver; without the //DEPS line a standalone run
+        // would compile here and then fail to find a driver at runtime.
+        assertThat(source).contains("//DEPS org.postgresql:postgresql:");
+        assertThat(source).contains("static final String AGENT_ID = \"" + spec.id() + "\"");
+
+        assertCompiles(dir, "DocBot.java", source);
     }
 
     @Test

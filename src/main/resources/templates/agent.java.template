@@ -5,6 +5,7 @@
 //DEPS org.springframework.ai:spring-ai-openai:__SPRING_AI__
 //DEPS com.openai:openai-java-client-okhttp:__OPENAI_SDK__
 //DEPS org.slf4j:slf4j-simple:__SLF4J__
+__TOOL_DEPS__
 
 // Generated from the agent spec "__AGENT_NAME__" (__AGENT_ID__).
 // Standalone: `jbang __CLASS_NAME__.java "your question"`.
@@ -54,6 +55,11 @@ public class __CLASS_NAME__ {
     static final String BASE_URL = env("LLM_BASE_URL", "__BASE_URL__");
     static final String API_KEY = env("LLM_API_KEY", "__API_KEY__");
     static final String MODEL = "__MODEL__";
+    /** Which agent this file is. Tools that own per-agent data key off it. */
+    static final String AGENT_ID = __AGENT_ID_LITERAL__;
+    static final String DB_URL = env("DB_URL", "__DB_URL__");
+    static final String DB_USERNAME = env("DB_USERNAME", "__DB_USERNAME__");
+    static final String DB_PASSWORD = env("DB_PASSWORD", "__DB_PASSWORD__");
     static final String SYSTEM_PROMPT = __SYSTEM_PROMPT__;
     static final int MAX_ITERATIONS = __MAX_ITERATIONS__;
 

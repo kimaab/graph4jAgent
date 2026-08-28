@@ -26,7 +26,8 @@ class CodeGeneratorTest {
         ToolRegistry registry = new ToolRegistry(
                 List.of(new CalculatorTool(MAPPER), new HttpGetTool(MAPPER), new WebSearchTool(MAPPER)),
                 MAPPER);
-        return new CodeGenerator(registry, "http://gateway.example/v1", "secret-key");
+        return new CodeGenerator(registry, "http://gateway.example/v1", "secret-key",
+                "jdbc:postgresql://db.example:5432/postgres", "postgres", "secret");
     }
 
     private static AgentSpec spec(GraphType type, List<String> tools, List<Step> steps,
