@@ -119,6 +119,7 @@ public class RunController {
      */
     private int emitSince(SseEmitter emitter, MessagesState<Message> state, int from) {
         List<Message> messages = state.messages();
+        log.info("sending {} messages", messages);
         for (int i = from; i < messages.size(); i++) {
             Message message = messages.get(i);
             if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {

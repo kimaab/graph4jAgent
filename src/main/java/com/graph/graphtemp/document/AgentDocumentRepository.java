@@ -16,6 +16,9 @@ import java.util.UUID;
 @Repository
 public class AgentDocumentRepository {
 
+    /** How many page rows go to the driver at once. */
+    private static final int PAGE_BATCH = 200;
+
     private final JdbcTemplate jdbc;
 
     AgentDocumentRepository(JdbcTemplate jdbc) {
@@ -35,15 +38,23 @@ public class AgentDocumentRepository {
 
         // Counted, not indexOf: two identical pages (two blank ones, say) would both
         // resolve to the first one's number and collide on the unique key.
-        List<Object[]> rows = new ArrayList<>(pages.size());
-        for (int i = 0; i < pages.size(); i++) {
-            // An empty page still gets a row so page numbers keep matching the file.
-            rows.add(new Object[]{id, i + 1, pages.get(i)});
-        }
-        jdbc.batchUpdate("""
+        // Sent in chunks so a thousand-page document does not build one enormous batch.
+        String sql = """
                 INSERT INTO agent_document_page (document_id, page_number, content)
                 VALUES (?, ?, ?)
-                """, rows);
+                """;
+        List<Object[]> chunk = new ArrayList<>(PAGE_BATCH);
+        for (int i = 0; i < pages.size(); i++) {
+            // An empty page still gets a row so page numbers keep matching the file.
+            chunk.add(new Object[]{id, i + 1, pages.get(i)});
+            if (chunk.size() == PAGE_BATCH) {
+                jdbc.batchUpdate(sql, chunk);
+                chunk.clear();
+            }
+        }
+        if (!chunk.isEmpty()) {
+            jdbc.batchUpdate(sql, chunk);
+        }
 
         return findById(id).orElseThrow(
                 () -> new IllegalStateException("document vanished right after insert: " + id));

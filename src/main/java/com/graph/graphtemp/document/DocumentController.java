@@ -2,6 +2,8 @@ package com.graph.graphtemp.document;
 
 import com.graph.graphtemp.agent.AgentSpecRepository;
 import com.graph.graphtemp.error.ApiException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -14,6 +16,10 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.List;
 import java.util.UUID;
 
@@ -24,6 +30,8 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/api/agents/{agentId}/documents")
 public class DocumentController {
+
+    private static final Logger log = LoggerFactory.getLogger(DocumentController.class);
 
     private final AgentSpecRepository agents;
     private final AgentDocumentRepository documents;
@@ -57,23 +65,51 @@ public class DocumentController {
             throw ApiException.badRequest("only PDF files are supported for now");
         }
 
-        byte[] bytes;
+        // Spool to disk and parse from there. getBytes() would put the whole upload on
+        // the heap, which a large PDF turns into an OutOfMemoryError.
+        Path spooled = spool(file);
         try {
-            bytes = file.getBytes();
+            List<String> pages = extractor.extractPages(spooled);
+            if (pages.stream().allMatch(String::isBlank)) {
+                // Almost always a scan: images of text, with no text layer to extract.
+                throw ApiException.badRequest("no text could be extracted; a scanned PDF "
+                        + "needs OCR before it can be searched");
+            }
+
+            return documents.insert(agentId, filename,
+                    file.getContentType() == null ? "application/pdf" : file.getContentType(),
+                    file.getSize(), pages);
+        } finally {
+            try {
+                Files.deleteIfExists(spooled);
+            } catch (IOException e) {
+                log.warn("could not delete the spooled upload {}", spooled, e);
+            }
+        }
+    }
+
+    /**
+     * Moves the upload to a file this method owns. Spring's own temp file is tied to the
+     * request and may already be gone by the time PDFBox reopens it.
+     */
+    private static Path spool(MultipartFile file) {
+        Path spooled;
+        try {
+            spooled = Files.createTempFile("agent-upload-", ".pdf");
         } catch (IOException e) {
+            throw new IllegalStateException("could not create a temp file for the upload", e);
+        }
+        try (InputStream in = file.getInputStream()) {
+            Files.copy(in, spooled, StandardCopyOption.REPLACE_EXISTING);
+            return spooled;
+        } catch (IOException e) {
+            try {
+                Files.deleteIfExists(spooled);
+            } catch (IOException ignored) {
+                // Losing a temp file matters less than reporting the real failure.
+            }
             throw ApiException.badRequest("could not read the upload: " + e.getMessage());
         }
-
-        List<String> pages = extractor.extractPages(bytes);
-        if (pages.stream().allMatch(String::isBlank)) {
-            // Almost always a scan: images of text, with no text layer to extract.
-            throw ApiException.badRequest(
-                    "no text could be extracted; a scanned PDF needs OCR before it can be searched");
-        }
-
-        return documents.insert(agentId, filename,
-                file.getContentType() == null ? "application/pdf" : file.getContentType(),
-                file.getSize(), pages);
     }
 
     @DeleteMapping("/{documentId}")

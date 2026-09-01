@@ -38,8 +38,8 @@
 |---|---|---|
 | `DB_HOST` / `DB_PORT` / `DB_NAME` | `192.168.105.3` / `5432` / `postgres` | PostgreSQL |
 | `DB_USERNAME` / `DB_PASSWORD` | `postgres` / — | 접속 계정 |
-| `UPLOAD_MAX_FILE_SIZE` | `20MB` | PDF 한 개 최대 크기 |
-| `UPLOAD_MAX_REQUEST_SIZE` | `25MB` | 요청 전체 최대 크기 (멀티파트 봉투 여유분 포함) |
+| `UPLOAD_MAX_FILE_SIZE` | `300MB` | PDF 한 개 최대 크기 |
+| `UPLOAD_MAX_REQUEST_SIZE` | `320MB` | 요청 전체 최대 크기 (멀티파트 봉투 여유분 포함) |
 | `LLM_BASE_URL` | `http://192.168.109.254:32609/v1` | **`/v1`까지 포함해야 합니다** (아래 함정 참고) |
 | `LLM_API_KEY` | `test_api_key` | 게이트웨이 키 |
 | `LLM_MODEL` | `google/gemma-4-31B-it` | 새 에이전트의 기본 모델 |
@@ -341,6 +341,15 @@ Postgres가 `,StopSel=` 을 StartSel 의 *값* 으로 읽어서, 발췌문 안�
 **한글은 전문검색이 조사에서 놓칩니다.** `to_tsvector('simple', ...)` 는 공백으로만 자르므로
 `스프링을` 과 `스프링` 은 다른 렉심입니다. `document_search` 가 전문검색으로 먼저 랭킹하고
 결과가 없을 때만 `ILIKE` 로 다시 훑는 2단 구조인 이유입니다.
+
+**큰 업로드는 힙이 아니라 디스크로 흘려야 합니다.** `MultipartFile.getBytes()` 는 파일 전체를
+`byte[]` 로 올리고, `Loader.loadPDF(byte[])` 는 그 위에서 파싱합니다. 274MB 파일을 힙 256MB 에서
+돌려보면 옛 경로는 **OutOfMemoryError**, 임시 파일로 흘리는 지금 경로는 3.6초에 통과합니다.
+업로드는 `Files.copy` 로 임시 파일에 받고, PDFBox 에는 `IOUtils.createTempFileOnlyStreamCache()`
+를 물려 자기 작업 데이터도 디스크에 두게 합니다.
+
+한도만 올리고 이걸 안 하면, 깔끔한 413 이 서버 전체를 죽이는 OOM 으로 바뀝니다.
+추출된 **텍스트** 는 여전히 메모리에 모이므로 페이지 수에 5,000 상한이 있습니다.
 
 **업로드 한도는 컨트롤러가 아니라 컨테이너가 정합니다.** Spring Boot 기본값은 파일당 **1MB**라
 평범한 PDF도 거부됩니다. Tomcat이 컨트롤러 진입 **전에** 잘라내므로 컨트롤러 안의 크기 검사는

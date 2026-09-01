@@ -21,8 +21,10 @@ spring:
       # Tomcat enforces these before any controller runs, and the defaults (1MB per
       # file) reject an ordinary PDF. The request cap sits above the file cap to leave
       # room for the multipart envelope.
-      max-file-size: ${UPLOAD_MAX_FILE_SIZE:20MB}
-      max-request-size: ${UPLOAD_MAX_REQUEST_SIZE:25MB}
+      max-file-size: ${UPLOAD_MAX_FILE_SIZE:300MB}
+      max-request-size: ${UPLOAD_MAX_REQUEST_SIZE:320MB}
+      # Spill to disk immediately rather than buffering in heap first.
+      file-size-threshold: 0
 
   ai:
     openai:
