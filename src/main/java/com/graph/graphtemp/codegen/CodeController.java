@@ -42,6 +42,20 @@ public class CodeController {
 
     public record CodeUpdate(@NotBlank(message = "must not be blank") String code) {}
 
+    /** @param edited whether an edit outranks the spec for this agent */
+    public record CodeStatus(boolean edited) {}
+
+    /**
+     * Just the edited flag, so the 정의 tab can warn that the form no longer decides
+     * what runs. Deliberately not {@code GET /code}: that renders the whole file, and
+     * generating a few hundred lines to answer one boolean is work for nothing.
+     */
+    @GetMapping("/{id}/code/status")
+    public CodeStatus status(@PathVariable UUID id) {
+        require(id);
+        return new CodeStatus(repository.findCode(id).isPresent());
+    }
+
     /** Plain text so the editor can drop it straight into a code viewer. */
     @GetMapping(value = "/{id}/code", produces = MediaType.TEXT_PLAIN_VALUE)
     public ResponseEntity<String> code(@PathVariable UUID id) {
