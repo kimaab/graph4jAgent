@@ -17,16 +17,32 @@ public class GraphController {
 
     private final AgentSpecRepository repository;
     private final GraphInspector inspector;
+    private final SourceSpecReader specReader;
 
-    GraphController(AgentSpecRepository repository, GraphInspector inspector) {
+    GraphController(AgentSpecRepository repository, GraphInspector inspector,
+                    SourceSpecReader specReader) {
         this.repository = repository;
         this.inspector = inspector;
+        this.specReader = specReader;
     }
 
     @GetMapping("/{id}/graph")
     public GraphView graph(@PathVariable UUID id) {
-        AgentSpec spec = repository.findById(id)
+        return inspector.inspect(require(id));
+    }
+
+    /**
+     * The spec as the agent's source actually defines it, for applying an edited file
+     * back onto the form. Answers from the source whether or not it has been edited;
+     * for an unedited agent it simply matches the spec.
+     */
+    @GetMapping("/{id}/source-spec")
+    public SourceSpec sourceSpec(@PathVariable UUID id) {
+        return specReader.read(require(id));
+    }
+
+    private AgentSpec require(UUID id) {
+        return repository.findById(id)
                 .orElseThrow(() -> ApiException.notFound("agent not found: " + id));
-        return inspector.inspect(spec);
     }
 }

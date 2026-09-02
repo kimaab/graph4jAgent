@@ -3,16 +3,15 @@ package com.graph.graphtemp.graph;
 import com.graph.graphtemp.agent.AgentSpec;
 import com.graph.graphtemp.codegen.AgentSource;
 import org.bsc.langgraph4j.CompiledGraph;
+import org.bsc.langgraph4j.internal.node.Node;
 import org.bsc.langgraph4j.prebuilt.MessagesState;
 import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.tool.ToolCallback;
 import org.springframework.stereotype.Component;
 
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Describes the graph an agent will run, for the flow tab.
@@ -29,9 +28,6 @@ import java.util.List;
 @Component
 public class GraphInspector {
 
-    /** The generated file's tool list; see {@code templates/agent.java.template}. */
-    private static final String TOOLS_METHOD = "tools";
-
     private final AgentSource source;
     private final AgentCodeCompiler compiler;
     private final AgentGraphs graphs;
@@ -47,16 +43,31 @@ public class GraphInspector {
         Class<?> agent = compiler.compile(src.className(), src.code(), src.digest());
         CompiledGraph<MessagesState<Message>> graph = graphs.build(spec);
 
-        return new GraphView(src.edited(), nodes(graph), edges(graph), tools(agent));
+        List<GraphView.Edge> edges = edges(graph);
+        return new GraphView(src.edited(), nodes(graph, edges), edges, AgentTools.namesOf(agent));
     }
 
-    private static List<GraphView.Node> nodes(CompiledGraph<MessagesState<Message>> graph) {
-        // Node ids are the only stable handle; sorted so the same graph always lays out
-        // the same way rather than following an unordered Set.
-        return graph.reduce((nodes, edges) -> nodes.elements.stream()
-                .map(node -> new GraphView.Node(node.id()))
-                .sorted(Comparator.comparing(GraphView.Node::id))
-                .toList());
+    /**
+     * Every node an edge can touch. START and END are sentinels rather than registered
+     * nodes, so they are absent from the graph's own node set while still being real
+     * endpoints — taking only the registered nodes would leave the edges into and out of
+     * the graph with nothing to attach to, and they would simply not be drawn.
+     */
+    private static List<GraphView.Node> nodes(CompiledGraph<MessagesState<Message>> graph,
+                                              List<GraphView.Edge> edges) {
+        // Sorted so the same graph always lays out the same way, rather than following
+        // an unordered Set.
+        // Held in a variable because reduce() infers its result type from the target,
+        // and a constructor argument gives it nothing to infer from.
+        List<String> declared = graph.reduce(
+                (nodes, unused) -> nodes.elements.stream().map(Node::id).toList());
+
+        Set<String> ids = new TreeSet<>(declared);
+        edges.forEach(edge -> {
+            ids.add(edge.source());
+            ids.add(edge.target());
+        });
+        return ids.stream().map(GraphView.Node::new).toList();
     }
 
     private static List<GraphView.Edge> edges(CompiledGraph<MessagesState<Message>> graph) {
@@ -77,28 +88,4 @@ public class GraphInspector {
         });
     }
 
-    /**
-     * Calls the generated {@code tools()} so the list reflects the code. A user who
-     * deletes a tool there changes this; the spec's own tool list does not move.
-     */
-    @SuppressWarnings("unchecked")
-    private static List<String> tools(Class<?> agent) {
-        Method method;
-        try {
-            method = agent.getDeclaredMethod(TOOLS_METHOD);
-        } catch (NoSuchMethodException e) {
-            // An edited file is allowed to drop the method; it just has no tools to show.
-            return List.of();
-        }
-        method.setAccessible(true);
-
-        try {
-            return ((List<ToolCallback>) method.invoke(null)).stream()
-                    .map(callback -> callback.getToolDefinition().name())
-                    .toList();
-        } catch (InvocationTargetException | IllegalAccessException | ClassCastException e) {
-            throw new GraphBuildException(
-                    "the agent's " + TOOLS_METHOD + "() could not be read: " + e, e);
-        }
-    }
 }
