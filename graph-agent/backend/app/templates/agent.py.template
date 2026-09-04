@@ -1,0 +1,96 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "langgraph>=0.2.60",
+#     "langchain-core>=0.3.28",
+#     "langchain-openai>=0.2.14",
+__TOOL_DEPS__
+# ]
+# ///
+"""__AGENT_NAME__
+
+Generated from the agent spec __AGENT_ID__.
+Standalone: `uv run __MODULE_NAME__.py "your question"` — the header above tells uv what
+to install, so nothing has to be set up first.
+
+This is the file the studio itself runs. Editing it changes what the agent does; the
+spec form stops deciding from that point on.
+"""
+
+import os
+import sys
+from typing import Annotated, Any, TypedDict
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
+
+# The gateway holds the credentials, so the key is a placeholder the SDK accepts.
+# An environment variable wins, which is what lets this file run somewhere else.
+BASE_URL = os.environ.get("LLM_BASE_URL") or __BASE_URL__
+API_KEY = os.environ.get("LLM_API_KEY") or __API_KEY__
+MODEL = __MODEL__
+# Which agent this file is. Tools that own per-agent data key off it.
+AGENT_ID = __AGENT_ID_LITERAL__
+DB_URL = os.environ.get("DB_URL") or __DB_URL__
+SYSTEM_PROMPT = __SYSTEM_PROMPT__
+MAX_ITERATIONS = __MAX_ITERATIONS__
+
+
+class State(TypedDict):
+    """Conversation state: an append-only list of messages."""
+
+    messages: Annotated[list, add_messages]
+
+
+__TOOL_FUNCTIONS__
+
+def tools() -> list:
+    """The tools this agent registers.
+
+    The studio reads this to draw the flow tab, so deleting a tool here removes it from
+    the picture as well as from the run.
+    """
+    return [__TOOL_INSTANCES__]
+
+
+def chat_model() -> ChatOpenAI:
+    return ChatOpenAI(model=MODEL, base_url=BASE_URL, api_key=API_KEY, temperature=0.7)
+
+
+def prompt_messages(history: list) -> list:
+    """Prepends the system prompt, when there is one."""
+    if not SYSTEM_PROMPT.strip():
+        return list(history)
+    return [SystemMessage(SYSTEM_PROMPT), *history]
+
+
+def run_config(thread_id: str) -> dict[str, Any]:
+    """Thread id keys the conversation history the checkpointer keeps.
+
+    The studio builds its config with this same function, so a standalone run and a run
+    in the browser are bounded identically.
+    """
+    return {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": recursion_limit(),
+    }
+
+
+__GRAPH_BUILDER__
+
+def main() -> None:
+    question = " ".join(sys.argv[1:]) or "안녕하세요"
+    graph = build_graph(chat_model())
+    final = graph.invoke({"messages": [HumanMessage(question)]}, run_config("cli"))
+
+    answer = final["messages"][-1].content if final["messages"] else ""
+    print(answer or "(no answer)")
+
+
+if __name__ == "__main__":
+    main()
