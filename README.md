@@ -6,10 +6,12 @@
 노드 캔버스/드래그앤드롭은 범위에 없습니다.
 
 > **백엔드가 둘 있습니다.**
-> 이 문서가 설명하는 것은 원래의 **Java · Spring Boot** 판(`src/`, `pom.xml`)입니다.
-> Agent Appstore에 올리기 위한 **Python · FastAPI** 판이 `backend/`에 있습니다 —
-> 같은 API, 같은 PostgreSQL 스키마, 같은 프론트엔드를 쓰고, 화면까지 한 앱으로 묶어
-> 배포합니다. 그쪽은 [`backend/README.md`](backend/README.md)를 보세요.
+> 이 문서가 설명하는 것은 원래의 **Java · Spring Boot** 판(`src/`, `pom.xml`)이며,
+> 지금은 보존만 하고 쓰지 않습니다.
+> 실제로 쓰는 것은 **Python · FastAPI** 판으로, 프론트엔드와 함께 [`graph-agent/`](graph-agent/)
+> 아래에 있습니다(`graph-agent/backend`, `graph-agent/frontend`) — 같은 API, 같은
+> PostgreSQL 스키마를 쓰고 화면까지 한 앱으로 묶어 Agent Appstore에 배포합니다.
+> 그쪽은 [`graph-agent/backend/README.md`](graph-agent/backend/README.md)를 보세요.
 
 ---
 
