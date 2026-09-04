@@ -207,3 +207,10 @@ uv run my_agent.py "(17 * 23) + 5 는 얼마야?"
   열려 있다는 전제와 같은 선택입니다. 공개 배포 전에 인증을 붙이세요.
 - 대화 이력은 `MemorySaver`라 프로세스 메모리에만 있습니다. 재배포하면 사라집니다.
 - `web_search`는 아직 스텁입니다.
+
+cd D:\dev\work\graphTemp\graph-agent\backend
+$env:DB_URL = 'postgresql://postgres:mobigen12#$@192.168.105.3:5432/postgres'
+$env:LLM_BASE_URL = "http://192.168.109.254:32609/v1"
+$env:LLM_MODEL = "google/gemma-4-31B-it"
+$env:PORT = "8099"    
+uv run python main.py

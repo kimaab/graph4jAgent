@@ -16,6 +16,7 @@ import types
 from typing import Any
 
 from . import source
+from .callbacks import ModelCallLogger
 from .errors import CodeCompilationException, GraphBuildException
 from .models import (
     AgentSpec,
@@ -78,6 +79,18 @@ def load(src: source.Source) -> types.ModuleType:
 def build(spec: AgentSpec):
     """The compiled graph this agent runs, built once per revision of its source."""
     src = source.of(spec)
+
+    # Which file is about to run, said before anything can fail while running it.
+    # `edited` is the half that matters: an agent behaving unlike its spec form is
+    # usually one whose source was edited, and nothing else in the log says so.
+    log.info(
+        "agent source: %s, %d lines, %s (%s)",
+        spec.name,
+        len(src.code.splitlines()),
+        "edited" if src.edited else "generated",
+        src.digest[:12],
+    )
+
     cached = _graphs.get(src.digest)
     if cached is not None:
         return cached
@@ -111,9 +124,18 @@ def run_config(spec: AgentSpec, thread_id: str) -> dict[str, Any]:
     """
     module = load(source.of(spec))
     builder = getattr(module, "run_config", None)
-    if callable(builder):
-        return builder(thread_id)
-    return {"configurable": {"thread_id": thread_id}}
+    config = (
+        builder(thread_id)
+        if callable(builder)
+        else {"configurable": {"thread_id": thread_id}}
+    )
+
+    # Added here rather than onto the model, because LangGraph passes this config down
+    # into every node: attaching it to the model logs the model's calls and nothing
+    # else, and the tools are half of what a run does. The generated file does not carry
+    # it — a standalone `uv run` should stay quiet unless its author asks otherwise.
+    listeners = list(config.get("callbacks") or [])
+    return {**config, "callbacks": [*listeners, ModelCallLogger()]}
 
 
 def graph_view(spec: AgentSpec) -> GraphView:
