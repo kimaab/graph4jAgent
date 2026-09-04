@@ -1,0 +1,104 @@
+@tool("document_search")
+def document_search(query: str) -> str:
+    """Search the PDF documents attached to this agent.
+
+    Returns matching passages with the file name and page number.
+    """
+    import psycopg
+
+    max_hits = 5
+
+    if not query or not query.strip():
+        return "error: 'query' is required"
+
+    try:
+        with psycopg.connect(DB_URL) as connection:
+            # Two passes. Postgres full-text search ranks first: it is indexed and it
+            # handles English well. It also misses Korean whenever a particle is
+            # attached — the corpus holds "스프링을" while the query says "스프링", and
+            # those are different lexemes — so a substring pass catches what the index
+            # cannot. The second pass runs only when the first finds nothing, so the
+            # common case stays on the index.
+            found = _ranked(connection, query, max_hits)
+            if not found:
+                found = _substring(connection, query, max_hits)
+    except psycopg.Error as error:
+        return f"error: could not reach the document store: {error}"
+
+    return found or f"No passage in the attached documents matches: {query}"
+
+
+def _ranked(connection, query: str, limit: int) -> str:
+    """Full-text pass, ordered by rank, with Postgres building the excerpt."""
+    sql = """
+        SELECT d.filename, p.page_number,
+               ts_headline('simple', p.content,
+                           plainto_tsquery('simple', %s),
+                           -- The quotes are required: a bare StartSel=, makes Postgres
+                           -- read ",StopSel=" as the marker itself.
+                           'MaxWords=60,MinWords=25,StartSel="",StopSel=""') AS excerpt
+          FROM agent_document_page p
+          JOIN agent_document d ON d.id = p.document_id
+         WHERE d.agent_id = %s::uuid
+           AND p.search_vector @@ plainto_tsquery('simple', %s)
+         ORDER BY ts_rank(p.search_vector, plainto_tsquery('simple', %s)) DESC
+         LIMIT %s
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(sql, (query, AGENT_ID, query, query, limit))
+        return _render(cursor.fetchall())
+
+
+def _substring(connection, query: str, limit: int) -> str:
+    """Substring pass, term by term.
+
+    It sees inside a Korean word, which the index cannot, and it scores pages by how
+    many of the query's words they contain — a model asks "Nimbus 의 내부 코드명이
+    뭐야?", no page holds that whole phrase, and the page holding three of its words is
+    the answer. Matching the query as one string, which is what this did at first, finds
+    nothing at all.
+    """
+    terms = _terms(query)
+    if not terms:
+        return ""
+
+    # One ILIKE per term: OR'd for matching, summed for ranking.
+    matches = " OR ".join(["p.content ILIKE %s"] * len(terms))
+    score = " + ".join(["(CASE WHEN p.content ILIKE %s THEN 1 ELSE 0 END)"] * len(terms))
+    sql = (
+        "SELECT d.filename, p.page_number, left(p.content, 400) AS excerpt"
+        " FROM agent_document_page p"
+        " JOIN agent_document d ON d.id = p.document_id"
+        f" WHERE d.agent_id = %s::uuid AND ({matches})"
+        f" ORDER BY ({score}) DESC, d.filename, p.page_number"
+        " LIMIT %s"
+    )
+    patterns = [f"%{term}%" for term in terms]
+    with connection.cursor() as cursor:
+        cursor.execute(sql, (AGENT_ID, *patterns, *patterns, limit))
+        return _render(cursor.fetchall())
+
+
+def _terms(query: str) -> list[str]:
+    """Splits a question into words worth matching.
+
+    One-character words are dropped: in Korean those are mostly particles, and they
+    match almost every page.
+    """
+    terms: list[str] = []
+    for word in query.strip().split():
+        cleaned = "".join(c for c in word if c not in "?!.,;:'\"()[]")
+        if len(cleaned) > 1 and cleaned not in terms:
+            terms.append(cleaned)
+    return terms
+
+
+def _render(rows) -> str:
+    import re
+
+    passages = []
+    for filename, page_number, excerpt in rows:
+        text = re.sub(r"\s+", " ", excerpt or "").strip()
+        passages.append(f"[{filename} p.{page_number}]\n{text}")
+    return "\n\n".join(passages)
+

@@ -1,9 +1,15 @@
 # Agent Studio
 
 브라우저에서 폼으로 LangGraph 에이전트를 정의하고, 서버가 그 정의로 그래프를 만들어 실행하며,
-같은 정의로 **독립 실행 가능한 Java 파일**을 생성해 내려주는 MVP입니다.
+같은 정의로 **독립 실행 가능한 파일**을 생성해 내려주는 MVP입니다.
 
 노드 캔버스/드래그앤드롭은 범위에 없습니다.
+
+> **백엔드가 둘 있습니다.**
+> 이 문서가 설명하는 것은 원래의 **Java · Spring Boot** 판(`src/`, `pom.xml`)입니다.
+> Agent Appstore에 올리기 위한 **Python · FastAPI** 판이 `backend/`에 있습니다 —
+> 같은 API, 같은 PostgreSQL 스키마, 같은 프론트엔드를 쓰고, 화면까지 한 앱으로 묶어
+> 배포합니다. 그쪽은 [`backend/README.md`](backend/README.md)를 보세요.
 
 ---
 
