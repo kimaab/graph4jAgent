@@ -98,6 +98,42 @@ REGISTRY: list[BuiltinTool] = [
         # The generated file talks to Postgres itself, so it carries its own driver.
         dependencies=["psycopg[binary]>=3.2"],
     ),
+    BuiltinTool(
+        name="semantic_sql",
+        description=(
+            "Turn a data question into safe SQL against the agent's data contract. "
+            "Call with 'question' alone to discover the relevant tables, columns and "
+            "governed metrics; then call again with 'ast' — a JSON query spec built "
+            "from what the first call returned — to get the compiled SQL. Only "
+            "tables, columns and metrics in the contract can be reached."
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": _STRING,
+                    "description": (
+                        "Step 1. The data question, in the user's own words. "
+                        "Returns the schema relevant to it."
+                    ),
+                },
+                "ast": {
+                    "type": _STRING,
+                    "description": (
+                        "Step 2. JSON query spec: "
+                        '{"metric": "...", "filters": [{"field": "...", '
+                        '"operator": "equals", "value": "..."}], "group_by": []} '
+                        'or {"target_table": "...", "aggregations": '
+                        '[{"field": "...", "function": "SUM", "alias": "..."}], '
+                        '"filters": [], "group_by": []}'
+                    ),
+                },
+            },
+            # Neither alone is required: the two steps use one parameter each.
+            "required": [],
+        },
+        symbol="semantic_sql",
+    ),
 ]
 
 _BY_NAME = {tool.name: tool for tool in REGISTRY}
