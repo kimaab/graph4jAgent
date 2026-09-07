@@ -21,7 +21,7 @@ import os
 import sys
 from typing import Annotated, Any, TypedDict
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
@@ -39,6 +39,27 @@ AGENT_ID = __AGENT_ID_LITERAL__
 DB_URL = os.environ.get("DB_URL") or __DB_URL__
 SYSTEM_PROMPT = __SYSTEM_PROMPT__
 MAX_ITERATIONS = __MAX_ITERATIONS__
+
+# How much conversation history is re-sent on each model call.
+#
+# The gateway model this was built against has a 16k window, and the history is only
+# one of its tenants: the system prompt, the tool definitions, the tool results of the
+# turn in progress and the reply itself all come out of the same 16k. Half is what is
+# left over once those are paid for, with room for a long answer.
+#
+# Raise it for a model with a bigger window. Lowering it does not save money — the
+# whole prompt is billed either way — it only makes the agent forget sooner.
+MAX_HISTORY_TOKENS = 8000
+
+# Of that, how much is kept word for word. The newest slice is what the model is still
+# reasoning over, so it stays whole; older tool results keep only their ends.
+VERBATIM_TOKENS = MAX_HISTORY_TOKENS // 2
+
+# How much of an old tool result survives at each end. The head has to be long enough
+# to hold a compiled SQL statement, which is the part a later turn refers back to; the
+# tail holds the row count and the summary line nl2sql appends when it truncates.
+COMPACT_HEAD = 320
+COMPACT_TAIL = 160
 
 
 class State(TypedDict):
@@ -62,11 +83,161 @@ def chat_model() -> ChatOpenAI:
     return ChatOpenAI(model=MODEL, base_url=BASE_URL, api_key=API_KEY, temperature=0.7)
 
 
+def estimated_tokens(text: str) -> int:
+    """A deliberately pessimistic token count.
+
+    Counted rather than measured because the tokenizer belongs to whatever model the
+    gateway is fronting, and this file has no way to ask it.
+
+    Korean is why the estimate cannot just be `len(text) / 4`. Byte-pair vocabularies
+    trained mostly on English split Hangul at roughly one token per syllable, so 3,000
+    Korean characters are about 3,000 tokens while 3,000 ASCII characters are about
+    750. A budget that assumed the English ratio would be wrong by 4x on exactly the
+    conversations this agent has.
+    """
+    korean = sum(1 for character in text if "가" <= character <= "힣")
+    return int(korean * 1.1 + (len(text) - korean) * 0.30)
+
+
+def message_tokens(message: Any) -> int:
+    """What one message costs, tool-call arguments included.
+
+    The arguments are part of the wire format and can be the largest part of an
+    assistant turn — a query spec with a list of ids easily outweighs the reply text.
+    """
+    size = estimated_tokens(str(getattr(message, "content", "") or ""))
+    for call in getattr(message, "tool_calls", None) or []:
+        size += estimated_tokens(str(call))
+    # Per-message framing (role, ids, delimiters). Small, but there are many messages.
+    return size + 4
+
+
+def compacted_result(message: Any) -> Any:
+    """An old tool result reduced to its head and tail, or unchanged if already small.
+
+    Tool output is the bulk of a tool-using conversation — measured at 87% of one — and
+    unlike prose it has a shape worth exploiting. nl2sql answers with the SQL on the
+    first line and the row count on the last; a document search leads with the file and
+    page. Both ends survive here and the middle, which is rows or passages the model has
+    already read once, does not.
+
+    Deliberately not an LLM summary. Summarising would cost a round trip on the same
+    model that is already short of context, and it would be that model restating
+    identifiers — the TDK addresses a later query is built from — with the freedom to
+    get one wrong. Cutting on structure cannot invent anything; it can only drop.
+    """
+    text = str(getattr(message, "content", "") or "")
+    if len(text) <= COMPACT_HEAD + COMPACT_TAIL + 40:
+        return message
+
+    shortened = (
+        f"{text[:COMPACT_HEAD]}\n"
+        f"… (앞선 턴의 결과라 가운데를 줄였습니다)\n"
+        f"{text[-COMPACT_TAIL:]}"
+    )
+    try:
+        return ToolMessage(content=shortened,
+                           tool_call_id=getattr(message, "tool_call_id", None))
+    except Exception:
+        # An edited file may put something else in the history. Losing the saving is
+        # fine; handing back a message the API rejects is not.
+        return message
+
+
+def compact_old_results(history: list, verbatim_from: int) -> list:
+    """Shortens tool results older than `verbatim_from`, leaving everything else alone.
+
+    Only tool results. A human turn is the question being answered and an assistant turn
+    carries the tool_calls that later results are matched to — shortening either loses
+    something the conversation cannot do without.
+    """
+    return [
+        message if index >= verbatim_from or not _is_tool_result(message)
+        else compacted_result(message)
+        for index, message in enumerate(history)
+    ]
+
+
+def trim_history(history: list) -> list:
+    """The most recent messages that fit in MAX_HISTORY_TOKENS, cut on a safe boundary.
+
+    The model is stateless, so every call re-sends the whole conversation. Without
+    this, a thread grows until the gateway refuses it — and it refuses the *request*,
+    so the agent stops answering entirely rather than degrading. With nl2sql that
+    arrives fast: one schema lookup plus one result is around 1,700 tokens, and those
+    stay in the history for every later turn.
+
+    **Where the cut lands is not free.** An assistant message carrying `tool_calls`
+    must be followed by a tool result for each of them; a tool result with no
+    preceding call is equally invalid. Slicing purely by budget lands in the middle of
+    such a group about as often as not, and the gateway answers 400 — trading the
+    context-length error for a different one. So the budget picks a candidate and the
+    boundary is then walked forward past any orphaned tool results.
+
+    The current turn is never trimmed. Everything from the last human message onward
+    is kept whatever it costs: dropping part of the question being answered produces a
+    confidently wrong answer, which is worse than an error.
+
+    Older tool results are shortened before anything is dropped. Losing a turn loses
+    the SQL that was run and the ids it found; keeping its first and last line costs
+    little and leaves the model something to refer back to. On a measured eight-turn
+    conversation this took 8,488 tokens down to about 1,761 — so the same budget now
+    holds several times more of the conversation than dropping alone did.
+    """
+    if not history:
+        return []
+
+    # The floor: the last human turn and everything after it.
+    floor = 0
+    for index in range(len(history) - 1, -1, -1):
+        if isinstance(history[index], HumanMessage):
+            floor = index
+            break
+
+    # The newest slice stays verbatim — the model is still working with it. Everything
+    # older keeps only the ends of each tool result.
+    verbatim, verbatim_from = VERBATIM_TOKENS, len(history)
+    for index in range(len(history) - 1, -1, -1):
+        verbatim -= message_tokens(history[index])
+        if verbatim < 0:
+            break
+        verbatim_from = index
+    history = compact_old_results(history, min(verbatim_from, floor))
+
+    budget, start = MAX_HISTORY_TOKENS, len(history)
+    for index in range(len(history) - 1, -1, -1):
+        budget -= message_tokens(history[index])
+        if budget < 0 and index < floor:
+            break
+        start = index
+
+    # A tool result whose call was cut away is not a message the API accepts.
+    while start < len(history) and _is_tool_result(history[start]):
+        start += 1
+
+    return history[start:]
+
+
+def _is_tool_result(message: Any) -> bool:
+    """True for a tool result, by type name rather than import.
+
+    `ToolMessage` is what LangChain produces, but an edited file may hand back plain
+    objects, and the check has to hold for those too — being wrong here means an
+    invalid request, not a wrong answer.
+    """
+    return (
+        getattr(message, "type", None) == "tool"
+        or type(message).__name__ == "ToolMessage"
+        or getattr(message, "tool_call_id", None) is not None
+    )
+
+
 def prompt_messages(history: list) -> list:
-    """Prepends the system prompt, when there is one."""
+    """The system prompt, then as much recent history as fits."""
+    trimmed = trim_history(list(history))
     if not SYSTEM_PROMPT.strip():
-        return list(history)
-    return [SystemMessage(SYSTEM_PROMPT), *history]
+        return trimmed
+    return [SystemMessage(SYSTEM_PROMPT), *trimmed]
 
 
 def run_config(thread_id: str) -> dict[str, Any]:

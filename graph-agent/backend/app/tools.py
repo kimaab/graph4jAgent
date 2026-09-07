@@ -137,13 +137,15 @@ REGISTRY: list[BuiltinTool] = [
     BuiltinTool(
         name="nl2sql",
         description=(
-            "Turn a data question into safe SQL against one of the databases "
-            "registered in the studio. Call with no arguments to list the available "
-            "databases; then with 'database' and 'question' to discover the tables "
-            "and columns relevant to the question; then with 'database' and 'ast' — "
-            "a JSON query spec built from what the previous call returned — to get "
-            "the compiled SQL. Only tables and columns present in the selected "
-            "database's synced schema can be reached."
+            "Answer a data question from one of the databases registered in the "
+            "studio, returning real rows. Call with no arguments to list the "
+            "available databases; with 'database' and 'tables' to see what tables a "
+            "database holds; with 'database' and 'question' to discover the few "
+            "tables and columns relevant to a question; then with 'database' and "
+            "'ast' — a JSON query spec built from what the previous call returned — "
+            "to compile the SQL, run it, and get the rows back. Only tables and "
+            "columns present in the selected database's synced schema can be "
+            "reached, and only SELECT can be produced."
         ),
         parameters_schema={
             "type": "object",
@@ -155,21 +157,33 @@ REGISTRY: list[BuiltinTool] = [
                         "to list the ones available."
                     ),
                 },
+                "tables": {
+                    "type": _STRING,
+                    "description": (
+                        "List what the database contains. '*' for every table, or "
+                        "part of a name to filter. Use this — not 'question' — when "
+                        "asked which tables exist."
+                    ),
+                },
                 "question": {
                     "type": _STRING,
                     "description": (
                         "Step 1. The data question, in the user's own words. "
-                        "Returns the schema relevant to it."
+                        "Returns the few tables closest to it, not a full listing."
                     ),
                 },
                 "ast": {
                     "type": _STRING,
                     "description": (
-                        "Step 2. JSON query spec: "
-                        '{"target_table": "...", "aggregations": '
-                        '[{"field": "...", "function": "SUM", "alias": "..."}], '
-                        '"filters": [{"field": "...", "operator": "equals", '
-                        '"value": "..."}], "group_by": []}'
+                        "Step 2. JSON query spec, run against the database. Keys: "
+                        "target_table, columns, aggregations "
+                        '[{"field","function":SUM|COUNT|AVG|MIN|MAX,"alias"}], '
+                        'time_bucket {"field","unit":minute|hour|day|month,"alias"}, '
+                        'filters [{"field","operator":equals|not_equals|'
+                        "greater_than|greater_or_equal|less_than|less_or_equal|in|"
+                        'not_in,"value"}], group_by, '
+                        'order_by [{"field","direction":asc|desc}], limit. '
+                        "Use time_bucket for any time series — raw rows will not fit."
                     ),
                 },
             },
@@ -178,8 +192,9 @@ REGISTRY: list[BuiltinTool] = [
         },
         symbol="nl2sql",
         # The generated file reads the registered schema out of the studio's own
-        # Postgres, so it carries the driver even when document_search is not selected.
-        dependencies=["psycopg[binary]>=3.2"],
+        # Postgres and then connects to the target database itself, so it carries
+        # both drivers regardless of which other tools are selected.
+        dependencies=["psycopg[binary]>=3.2", "PyMySQL>=1.1"],
     ),
 ]
 
