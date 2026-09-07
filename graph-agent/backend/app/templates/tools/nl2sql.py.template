@@ -1,0 +1,575 @@
+# ── 데이터 계약 ────────────────────────────────────────────────────────────
+# semantic_sql과 달리 이 도구는 계약서를 소스에 들고 있지 않습니다. 스튜디오에
+# 등록된 데이터소스의 스키마를 읽어 그때그때 계약서로 씁니다.
+#
+# 그렇게 한 이유는 두 가지입니다. 스키마는 에이전트보다 자주 바뀌는데, 컬럼 하나
+# 추가에 에이전트를 다시 생성해야 한다면 아무도 하지 않습니다. 그리고 대상 DB가
+# 에이전트가 도는 곳에서 닿는다는 보장이 없습니다 — 등록 시점에 스튜디오가 한 번
+# 읽어두면, 이 도구는 대상 DB를 한 번도 건드리지 않고 SQL만 만들어냅니다.
+#
+# 화이트리스트가 느슨해진 것은 아닙니다. 계약서의 출처가 소스에서 DB로 옮겨갔을
+# 뿐, 여기 없는 테이블·컬럼은 여전히 컴파일 단계에서 거부됩니다.
+#
+# 캐시는 두지 않습니다. 호출마다 인덱스 조회 한 번이고, 그 값으로 스키마 변경이
+# 즉시 반영되는 쪽을 삽니다 — 프로세스에 캐시를 들고 있으면 동기화를 눌러도
+# 돌고 있는 에이전트만 옛 스키마를 계속 보고, 그 증상은 원인이 안 보입니다.
+
+# ── 탐색 결과 예산 ─────────────────────────────────────────────────────────
+# 1단계가 돌려준 스키마는 그대로 프롬프트에 남아 2단계까지 따라다닙니다.
+# 게이트웨이 모델의 컨텍스트가 16k라 이 예산이 곧 실패 여부입니다.
+#
+# 컬럼 110개짜리 테이블을 들여쓴 JSON으로 내보내면 컬럼당 130자, 한 테이블에
+# 14,000자입니다. 그래서 형식은 한 줄에 컬럼 하나입니다.
+MAX_COLUMNS = 30
+MAX_CHARS = 3000
+# 한 질문에 붙일 테이블 수. 늘리면 조인을 못 하는 컴파일러에 쓸모없는 테이블만
+# 더 붙습니다.
+MAX_TABLES = 3
+
+_FUNCTIONS = ("SUM", "COUNT", "AVG", "MIN", "MAX")
+_OPERATORS = {
+    "equals": "=",
+    "not_equals": "!=",
+    "greater_than": ">",
+    "less_than": "<",
+}
+
+# 드라이버별 식별자 인용 문자. MySQL은 백틱, PostgreSQL은 쌍따옴표입니다.
+# 잘못 고르면 예약어 컬럼(`status`, `order`, `rank`)에서 문법 오류가 납니다.
+_QUOTE = {"mysql": "`", "postgresql": '"'}
+
+
+def _fetch(sql: str, params: tuple) -> list:
+    """스튜디오 DB에 한 번 묻고 끝냅니다.
+
+    풀을 두지 않는 것은 이 파일이 단독 실행도 되기 때문입니다 — 생성된 에이전트를
+    `uv run`으로 돌릴 때 붙잡고 있을 프로세스가 없습니다.
+    """
+    import psycopg
+
+    with psycopg.connect(DB_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(sql, params)
+            return cursor.fetchall()
+
+
+def _list_databases() -> str:
+    """등록된 데이터소스 목록. 모델이 `database`에 무엇을 적을지 여기서 봅니다."""
+    rows = _fetch(
+        "SELECT d.name, d.description, d.driver, d.synced_at,"
+        "       (SELECT count(*) FROM datasource_table t"
+        "         WHERE t.datasource_id = d.id)"
+        "  FROM datasource d ORDER BY d.name",
+        (),
+    )
+    if not rows:
+        return (
+            "등록된 데이터베이스가 없습니다. 스튜디오의 데이터소스 화면에서 "
+            "DB를 등록하고 스키마를 동기화해야 이 도구를 쓸 수 있습니다."
+        )
+
+    lines = []
+    for name, description, driver, synced_at, table_count in rows:
+        note = f"테이블 {table_count}개"
+        if synced_at is None:
+            # 동기화 전에는 계약서가 비어 있습니다. 목록에서 감추면 모델은 이름을
+            # 골랐다가 "테이블이 없다"는 답만 받고 이유를 알지 못합니다.
+            note = "아직 스키마를 동기화하지 않음 — 조회할 수 없습니다"
+        lines.append(f"{name} ({driver}) — {description or '(설명 없음)'} [{note}]")
+
+    return "사용할 수 있는 데이터베이스:\n" + "\n".join(f"  {line}" for line in lines)
+
+
+def _load_contract(database: str) -> dict:
+    """이름으로 데이터소스를 찾아 그 스키마를 계약서로 만듭니다.
+
+    @raises ValueError 이름이 없을 때. 등록된 이름을 함께 실어야 모델이 스스로
+    고쳐 다시 부를 수 있습니다.
+    """
+    found = _fetch(
+        "SELECT id, name, driver FROM datasource WHERE lower(name) = lower(%s)",
+        (database,),
+    )
+    if not found:
+        known = _fetch("SELECT name FROM datasource ORDER BY name", ())
+        raise ValueError(
+            f"등록되지 않은 데이터베이스입니다 -> {database!r} "
+            f"(사용 가능: {', '.join(r[0] for r in known) or '없음'})"
+        )
+
+    datasource_id, name, driver = found[0]
+    # 별칭을 붙이는 것은 이 다섯 개 중 이름이 겹치는 것이 둘 있기 때문입니다 —
+    # t.name/c.name, t.description/c.description. 튜플로 받는 한 상관없지만,
+    # 나중에 누가 dict 커서로 바꾸면 겹친 쪽이 조용히 하나로 합쳐집니다.
+    rows = _fetch(
+        "SELECT t.name AS table_name, t.description AS table_note,"
+        "       c.name AS column_name, c.data_type, c.description AS column_note"
+        "  FROM datasource_table t"
+        "  LEFT JOIN datasource_column c ON c.table_id = t.id"
+        " WHERE t.datasource_id = %s"
+        " ORDER BY t.name, c.ordinal",
+        (datasource_id,),
+    )
+
+    tables = {}
+    for table_name, table_note, column, data_type, column_note in rows:
+        table = tables.get(table_name)
+        if table is None:
+            table = {"name": table_name, "description": table_note or "", "columns": []}
+            tables[table_name] = table
+        # LEFT JOIN이라 컬럼 없는 테이블은 NULL 한 줄로 옵니다.
+        if column is not None:
+            table["columns"].append({
+                "name": column,
+                "type": data_type or "",
+                "description": column_note or "",
+            })
+
+    if not tables:
+        raise ValueError(
+            f"{name!r}의 스키마가 비어 있습니다. 스튜디오에서 이 데이터소스를 "
+            "동기화한 뒤 다시 시도하십시오"
+        )
+    return {"name": name, "driver": driver, "tables": list(tables.values())}
+
+
+def _tokens(text: str) -> list:
+    """단어로 쪼갠 결과. 한글은 글자 2-gram으로 끊습니다.
+
+    공백으로만 자르면 "매출액의"와 "매출액"이 서로 다른 토큰이 되어, 조사 하나
+    때문에 관련 테이블을 놓칩니다. 2-gram이면 "매출","출액"이 겹쳐서 잡힙니다.
+    """
+    import re
+
+    found = []
+    for match in re.finditer(r"[a-z0-9_]+|[가-힣一-鿿]+", text.lower()):
+        chunk = match.group()
+        if chunk[0].isascii():
+            found.append(chunk)
+        elif len(chunk) == 1:
+            found.append(chunk)
+        else:
+            found.extend(chunk[i : i + 2] for i in range(len(chunk) - 1))
+    return found
+
+
+class _Pruner:
+    """질문과 관련 있는 테이블만 골라냅니다.
+
+    스키마 전체를 프롬프트에 넣으면 테이블이 늘어날수록 토큰과 노이즈가 같이
+    늘고, 모델이 엉뚱한 테이블을 고를 여지도 같이 커집니다. 등록된 DB를 통째로
+    읽어오는 이 도구에서는 semantic_sql보다 더 중요합니다 — 손으로 고른 몇 개가
+    아니라 그 DB에 있는 전부가 후보입니다.
+
+    TF-IDF를 직접 구현한 이유는 의존성입니다. scikit-learn은 numpy·scipy까지
+    100MB가 넘고, 생성된 에이전트는 `uv run`으로 제 의존성을 직접 설치합니다.
+    """
+
+    def __init__(self, contract: dict) -> None:
+        self.entries = []
+        for table in contract["tables"]:
+            text = " ".join(
+                [table["name"], table.get("description", "")]
+                + [c.get("description", "") for c in table["columns"]]
+                + [c["name"] for c in table["columns"]]
+            )
+            self.entries.append((table, _tokens(text)))
+
+        # 문서 빈도: 몇 개의 테이블에 이 토큰이 나오는가.
+        self.document_count = len(self.entries) or 1
+        self.frequency = {}
+        for _table, tokens in self.entries:
+            for token in set(tokens):
+                self.frequency[token] = self.frequency.get(token, 0) + 1
+
+    def _weights(self, tokens: list) -> dict:
+        """TF-IDF 벡터. IDF는 로그 스무딩이라 모든 항목에 나오는 토큰도 0이 아닙니다."""
+        import math
+
+        counts = {}
+        for token in tokens:
+            counts[token] = counts.get(token, 0) + 1
+
+        weights = {}
+        for token, count in counts.items():
+            appears = self.frequency.get(token, 0)
+            idf = math.log(self.document_count / (1 + appears)) + 1.0
+            weights[token] = count * idf
+        return weights
+
+    def _cosine(self, left: dict, right: dict) -> float:
+        import math
+
+        shared = set(left) & set(right)
+        if not shared:
+            return 0.0
+        dot = sum(left[token] * right[token] for token in shared)
+        size = math.sqrt(sum(v * v for v in left.values())) * math.sqrt(
+            sum(v * v for v in right.values())
+        )
+        return dot / size if size else 0.0
+
+    def prune(self, question: str, top_k: int = MAX_TABLES, relative: float = 0.3) -> list:
+        """상위 top_k개 중, 1등 점수의 `relative` 배 이상인 테이블만.
+
+        고정 개수로만 자르면 한 테이블이 압도적으로 관련 있을 때도 2등이 딸려
+        옵니다 — 웹 트래픽 질문에서 매출 테이블이 0.50 대 0.06으로 밀리고도
+        프롬프트에 들어가는 식입니다. 상대 문턱이 그런 찌꺼기만 떨굽니다.
+        """
+        query = self._weights(_tokens(question))
+        scored = sorted(
+            ((self._cosine(query, self._weights(tokens)), table)
+             for table, tokens in self.entries),
+            key=lambda row: row[0],
+            reverse=True,
+        )
+
+        best = scored[0][0] if scored else 0.0
+        floor = best * relative
+        picked = [table for score, table in scored[:top_k] if score > 0 and score >= floor]
+
+        # 아무것도 걸리지 않으면 점수 순 상위 몇 개라도 보여줍니다. 빈 스키마를
+        # 받은 모델은 컬럼을 지어내기 시작하고, 그 편이 나쁩니다.
+        return picked or [table for _score, table in scored[:top_k]]
+
+
+def _describe(tables: list, question: str, contract: dict) -> str:
+    """프루닝 결과를 모델이 읽을 압축 텍스트로.
+
+    JSON을 버린 이유는 순전히 크기입니다. 같은 내용이 들여쓴 JSON에서는 컬럼당
+    130자, 여기서는 30자 안팎입니다. 모델이 읽어야 하는 것은 이름·타입·설명
+    셋뿐이고, 중괄호와 따옴표는 그 셋을 담느라 낸 비용이었습니다.
+    """
+    blocks = [f"DATABASE {contract['name']} ({contract['driver']})"]
+
+    # 테이블 여러 개가 잡히면 예산을 나눠 씁니다. 각자 30개씩 가져가면 총량이
+    # 상한을 넘고, 그때는 마지막 테이블이 줄 중간에서 잘려 나갑니다.
+    budget = max(8, MAX_COLUMNS // max(len(tables), 1))
+
+    for table in tables:
+        shown, hidden = _pick_columns(table["columns"], question, budget)
+        head = f"TABLE {table['name']}"
+        if table.get("description"):
+            head += f" — {table['description']}"
+        if hidden:
+            head += f"  (컬럼 {len(table['columns'])}개 중 질문에 가까운 {len(shown)}개만)"
+
+        rows = [
+            f"  {c['name']} {c.get('type', '')} {c.get('description', '')}".rstrip()
+            for c in shown
+        ]
+        blocks.append("\n".join([head, *rows]))
+
+    text = "\n\n".join(blocks)
+    if len(text) > MAX_CHARS:
+        # 마지막 온전한 줄까지만. 줄 한가운데서 자르면 반쪽짜리 컬럼 이름이
+        # 남고, 모델은 그것을 진짜 이름으로 받아 적습니다.
+        text = text[:MAX_CHARS].rsplit("\n", 1)[0]
+        # 잘렸다는 사실은 반드시 남깁니다. 조용히 자르면 모델은 없는 컬럼을
+        # 지어내고, 그 실패는 프롬프트 예산 문제처럼 보이지 않습니다.
+        text += "\n... (길어서 잘랐습니다. 질문을 좁혀 다시 물어보세요)"
+    return text
+
+
+def _pick_columns(columns: list, question: str, limit: int):
+    """넓은 테이블에서 질문에 가까운 컬럼만 고릅니다. (고른 것, 감춘 개수)
+
+    110개짜리 테이블을 통째로 내보내면 그 한 번으로 컨텍스트가 끝납니다. 질문과
+    겹치는 토큰이 많은 순으로 고르되, **원래 순서로 되돌려** 내보냅니다 — 점수순
+    나열은 사람이 읽기 어렵고, 컬럼 순서에는 키가 앞에 오는 정보가 들어 있습니다.
+    """
+    if len(columns) <= limit:
+        return columns, 0
+
+    wanted = set(_tokens(question))
+
+    def overlap(column: dict) -> int:
+        text = f"{column['name']} {column.get('description', '')}"
+        return len(wanted & set(_tokens(text)))
+
+    ranked = sorted(columns, key=overlap, reverse=True)[:limit]
+    keep = {id(c) for c in ranked}
+    shown = [c for c in columns if id(c) in keep]
+    return shown, len(columns) - len(shown)
+
+
+def _match(name, options):
+    """대소문자를 무시하고 이름을 찾아 계약서에 적힌 표기로 돌려줍니다.
+
+    스키마의 이름이 `TB_ASPIRIN_URL`처럼 전부 대문자여도 모델은 소문자로 적는
+    쪽으로 기웁니다. MySQL은 컬럼명 대소문자를 가리지 않으므로, 여기서 막으면
+    DB가 받아줬을 쿼리를 우리가 거절하는 셈입니다.
+
+    화이트리스트가 느슨해지는 것은 아닙니다. 계약서에 없는 이름은 그대로 없고,
+    SQL에 나가는 것은 언제나 계약서 쪽 표기입니다.
+    """
+    if not isinstance(name, str):
+        return None
+    if name in options:
+        return name
+    lowered = name.lower()
+    for candidate in options:
+        if candidate.lower() == lowered:
+            return candidate
+    return None
+
+
+class _Compiler:
+    """검증된 AST를 SQL로 조립합니다.
+
+    모델이 무엇을 넘기든 여기서 화이트리스트를 통과하지 못하면 SQL이 되지
+    않습니다. 테이블·컬럼·집계함수·연산자 네 가지 모두 계약서에 있는 것만
+    허용합니다. 계약서가 DB에서 온다는 점만 semantic_sql과 다르고, 검증은 같습니다.
+    """
+
+    def __init__(self, contract: dict) -> None:
+        self.columns = {
+            t["name"]: [c["name"] for c in t["columns"]] for t in contract["tables"]
+        }
+        self.driver = contract["driver"]
+        self.quote = _QUOTE.get(self.driver, '"')
+
+    # AST가 이해하는 키의 전부. 모르는 키는 조용히 버리지 않고 거부합니다.
+    KEYS = {"target_table", "aggregations", "filters", "group_by"}
+
+    # 모델이 자주 시도하지만 이 컴파일러가 만들지 않는 것들. 이름을 알아보고
+    # 무엇이 없는지 말해주는 편이, 낯선 키라고만 하는 것보다 고쳐 쓰기 쉽습니다.
+    UNSUPPORTED = {
+        "order_by": "정렬(ORDER BY)",
+        "sort": "정렬(ORDER BY)",
+        "limit": "상위 N개 제한(LIMIT)",
+        "top": "상위 N개 제한(LIMIT)",
+        "having": "집계 결과 필터(HAVING)",
+        "joins": "테이블 조인(JOIN)",
+        "join": "테이블 조인(JOIN)",
+        "distinct": "중복 제거(DISTINCT)",
+        "subquery": "서브쿼리",
+        # semantic_sql에는 있고 여기에는 없습니다. 이름을 알아보고 거부해야
+        # 모델이 그 도구의 사용법을 여기 그대로 옮겨 왔다는 것을 알 수 있습니다.
+        "metric": "지표(metric) 기반 조회",
+    }
+
+    def compile(self, ast: dict) -> str:
+        # 모르는 키를 무시하면 "상위 10개만"이라는 질문에 LIMIT 없는 쿼리가
+        # 나가고, 아무도 그 사실을 말하지 않습니다. 모델은 답했다고 믿고
+        # 사용자에게 내놓습니다 — 에러보다 나쁜 결과입니다.
+        unknown = set(ast) - self.KEYS
+        if unknown:
+            named = [self.UNSUPPORTED[k] for k in sorted(unknown) if k in self.UNSUPPORTED]
+            other = sorted(k for k in unknown if k not in self.UNSUPPORTED)
+            parts = []
+            if named:
+                parts.append(
+                    "이 도구는 " + ", ".join(dict.fromkeys(named)) + "을(를) 만들지 않습니다"
+                )
+            if other:
+                parts.append(f"모르는 항목입니다 -> {', '.join(other)}")
+            raise ValueError(
+                "; ".join(parts)
+                + ". 쓸 수 있는 것: target_table, aggregations, filters, group_by. "
+                "그 범위로 다시 만들거나, 불가능하면 사용자에게 그렇게 답하십시오"
+            )
+
+        table = _match(ast.get("target_table"), self.columns)
+        if table is None:
+            raise ValueError(
+                f"조회할 수 없는 테이블입니다 -> {ast.get('target_table')!r} "
+                f"(사용 가능: {', '.join(self.columns)})"
+            )
+        allowed = self.columns[table]
+
+        aggregations = list(ast.get("aggregations") or [])
+        select = ", ".join(self._aggregation(a, table, allowed) for a in aggregations)
+        clauses = [f"SELECT {select or '*'}", f"FROM {self._identifier(table)}"]
+
+        where = [self._filter(f, table, allowed) for f in (ast.get("filters") or [])]
+        if where:
+            clauses.append("WHERE " + " AND ".join(where))
+
+        grouping = []
+        for column in ast.get("group_by") or []:
+            resolved = _match(column, allowed)
+            if resolved is None:
+                raise ValueError(f"그룹화할 수 없는 컬럼입니다 -> {table}.{column}")
+            grouping.append(resolved)
+        if grouping:
+            clauses.append(
+                "GROUP BY " + ", ".join(self._identifier(c) for c in grouping)
+            )
+
+        return " ".join(clauses) + ";"
+
+    def _aggregation(self, spec: dict, table: str, allowed: list) -> str:
+        field = spec.get("field")
+        function = str(spec.get("function", "")).upper()
+        alias = spec.get("alias") or f"{function.lower()}_{field}"
+
+        if function not in _FUNCTIONS:
+            raise ValueError(
+                f"허용되지 않은 집계 함수입니다 -> {function!r} "
+                f"(사용 가능: {', '.join(_FUNCTIONS)})"
+            )
+        resolved = field if field == "*" else _match(field, allowed)
+        if resolved is None:
+            raise ValueError(f"존재하지 않는 컬럼입니다 -> {table}.{field}")
+        # COUNT(*)의 별은 컬럼이 아니라 문법이라 감싸면 안 됩니다.
+        target = "*" if field == "*" else self._identifier(resolved)
+        return f"{function}({target}) AS {self._alias(alias)}"
+
+    def _identifier(self, name: str) -> str:
+        """계약서에 있는 이름을 드라이버의 인용 문자로 감쌉니다.
+
+        예약어가 목적입니다: `status`, `order`, `rank`는 모두 그럴듯한 컬럼명이면서
+        예약어라, 감싸지 않으면 문법 오류가 납니다.
+
+        영문/숫자/밑줄만 받으면 안 됩니다. 실제 스키마에는 `평균기온(°C)`,
+        `사고원인-대분류` 같은 컬럼이 있고, 인용만 하면 DB는 이들을 문제없이
+        받습니다. 좁게 막으면 DB가 받아줬을 쿼리를 우리가 거절하게 됩니다.
+
+        인용 부호 안에서 특별한 문자는 인용 부호 자신뿐이라, 그것과 NUL만
+        거부하면 인용이 깨지지 않습니다. 이름은 이미 계약서 화이트리스트를
+        통과한 것이므로 주입 경로도 아닙니다.
+        """
+        text = str(name)
+        if not text:
+            raise ValueError("빈 식별자는 쓸 수 없습니다")
+        if self.quote in text or "\x00" in text:
+            raise ValueError(
+                f"식별자에 {self.quote}나 NUL을 쓸 수 없습니다 -> {name!r}"
+            )
+        return f"{self.quote}{text}{self.quote}"
+
+    def _alias(self, alias: str) -> str:
+        """별칭은 계약서에 없는, 모델이 그때그때 지어내는 유일한 식별자입니다.
+
+        화이트리스트가 받쳐주지 않는데도 컬럼명과 같은 문자 규칙을 씁니다. 인용
+        부호 안에서 특별한 문자는 인용 부호뿐이므로, 그것만 막으면 모델이 무엇을
+        적어 보내든 SQL 구조에 영향을 주지 못하고 이름으로만 남습니다 — 값을
+        홑따옴표 안에 가두는 것과 같은 논리입니다.
+
+        길이와 공백은 별칭에만 있는 제약입니다. 식별자는 64자를 넘을 수 없고
+        공백으로 끝날 수 없는데, 계약서의 이름과 달리 모델의 별칭은 그 둘을
+        지킨다는 보장이 없습니다.
+        """
+        text = str(alias)
+        if not text or text != text.strip():
+            raise ValueError(f"별칭은 비어 있거나 공백으로 끝날 수 없습니다 -> {alias!r}")
+        if len(text) > 64:
+            raise ValueError(f"별칭은 64자를 넘을 수 없습니다 -> {text[:20]}...")
+        if self.quote in text or "\x00" in text:
+            raise ValueError(f"별칭에 {self.quote}나 NUL을 쓸 수 없습니다 -> {alias!r}")
+        return f"{self.quote}{text}{self.quote}"
+
+    def _filter(self, spec: dict, table: str, allowed: list) -> str:
+        field = spec.get("field")
+        operator = spec.get("operator")
+
+        resolved = _match(field, allowed)
+        if resolved is None:
+            raise ValueError(f"필터링할 수 없는 컬럼입니다 -> {table}.{field}")
+        if operator not in _OPERATORS:
+            raise ValueError(
+                f"허용되지 않는 비교 연산자입니다 -> {operator!r} "
+                f"(사용 가능: {', '.join(_OPERATORS)})"
+            )
+        return (
+            f"{self._identifier(resolved)} {_OPERATORS[operator]} "
+            f"{self._literal(spec.get('value'))}"
+        )
+
+    def _literal(self, value) -> str:
+        """값을 SQL 리터럴로. 식별자와 달리 값은 화이트리스트로 막을 수 없습니다.
+
+        **MySQL에서 백슬래시 거부는 선택이 아닙니다.** MySQL/MariaDB는 기본
+        sql_mode에 NO_BACKSLASH_ESCAPES가 없어서 문자열 안의 백슬래시가
+        이스케이프 문자입니다. 홑따옴표 겹치기만으로 막으면 `\\' OR 1=1 -- `
+        같은 값이 `'\\'' OR 1=1 -- '`가 되고, 여기서 `\\'`가 따옴표를 이스케이프해
+        리터럴을 빠져나갑니다.
+
+        PostgreSQL은 standard_conforming_strings가 기본 on이라 백슬래시가
+        평범한 문자입니다. 거기까지 거부하면 경로나 정규식이 든 값을 쓸 수 없게
+        되므로, 제약은 그것이 필요한 드라이버에만 겁니다.
+        """
+        if isinstance(value, bool):
+            return "TRUE" if value else "FALSE"
+        if isinstance(value, (int, float)):
+            return str(value)
+        if value is None:
+            return "NULL"
+
+        text = str(value)
+        if "\x00" in text:
+            raise ValueError("값에 NUL 문자를 넣을 수 없습니다")
+        if self.driver == "mysql" and "\\" in text:
+            raise ValueError(
+                "값에 백슬래시를 넣을 수 없습니다 "
+                "(MySQL에서 백슬래시는 이스케이프 문자입니다)"
+            )
+        return "'" + text.replace("'", "''") + "'"
+
+
+@tool("nl2sql")
+def nl2sql(database: str = "", question: str = "", ast: str = "") -> str:
+    """Turn a data question into safe SQL against a registered database.
+
+    Step 0 - pick a database: call with no arguments to list the registered databases.
+    Step 1 - discovery: call with `database` and `question`. Returns the tables and
+    columns of that database relevant to the question.
+    Step 2 - compile: call with `database` and `ast`, a JSON object built from what
+    step 1 returned.
+
+        {"target_table": "TB_ASPIRIN_URL",
+         "aggregations": [{"field": "ASPIRIN_URL_ID", "function": "COUNT",
+                           "alias": "url_count"}],
+         "filters": [{"field": "DOMAIN_COLLECT_YN", "operator": "equals", "value": 1}],
+         "group_by": []}
+
+    Never invent a table or column that step 1 did not return.
+    """
+    import json
+
+    # 인자가 하나도 없으면 목록입니다. 모델이 어느 DB가 있는지 모른 채 이름을
+    # 지어내는 것을 막는 것이 이 분기의 목적입니다.
+    if not (database or "").strip():
+        if (question or ast or "").strip():
+            return (
+                "error: 'database'가 필요합니다. 인자 없이 호출하면 등록된 "
+                "데이터베이스 목록을 볼 수 있습니다"
+            )
+        try:
+            return _list_databases()
+        except Exception as error:
+            return f"error: 데이터소스 목록을 읽지 못했습니다 -> {error}"
+
+    if not (question or "").strip() and not (ast or "").strip():
+        return "error: 'question'(탐색) 또는 'ast'(컴파일) 중 하나는 필요합니다"
+
+    try:
+        contract = _load_contract(database)
+    except ValueError as error:
+        return f"error: {error}"
+    except Exception as error:
+        return f"error: 스키마를 읽지 못했습니다 -> {error}"
+
+    # 탐색: 질문만 왔으면 관련 스키마를 돌려줍니다.
+    if not (ast or "").strip():
+        return _describe(_Pruner(contract).prune(question), question, contract)
+
+    payload = (ast or "").strip()
+    # 모델이 코드펜스를 붙여 보내는 일이 흔하고, 그것 때문에 실패시킬 이유는 없습니다.
+    if payload.startswith("```"):
+        payload = payload.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError as error:
+        return f"error: ast가 올바른 JSON이 아닙니다 -> {error}"
+    if not isinstance(parsed, dict):
+        return f"error: ast는 JSON 객체여야 합니다 (받은 것: {type(parsed).__name__})"
+
+    try:
+        return _Compiler(contract).compile(parsed)
+    except (ValueError, KeyError, TypeError) as error:
+        # 예외를 올리지 않고 문자열로 돌려주는 쪽이, 모델이 스스로 고쳐 다시
+        # 호출할 수 있어서 낫습니다. 실행이 끊기면 그럴 기회가 없습니다.
+        return f"error: {error}"

@@ -67,6 +67,60 @@ export interface ToolInfo {
   parameters_schema: Record<string, unknown>;
 }
 
+/** Which database a datasource points at. Decides how its schema is read and, later,
+ *  how the nl2sql tool quotes identifiers. */
+export type Driver = "mysql" | "postgresql";
+
+/**
+ * A database the nl2sql tool may query.
+ *
+ * There is no `password` field, and that is the point: the server accepts one on write
+ * and never sends it back, so no response shape here could leak it.
+ */
+export interface Datasource {
+  id: string;
+  name: string;
+  description: string;
+  driver: Driver;
+  host: string;
+  port: number;
+  db_name: string;
+  /** PostgreSQL only; blank means "public". MySQL has no schema apart from the database. */
+  db_schema: string;
+  username: string;
+  /** When the schema was last read off the target database; null until a sync runs. */
+  synced_at: string | null;
+  table_count: number;
+}
+
+/**
+ * What POST/PUT accept. `password` is write-only, and sending it blank on an update
+ * keeps whatever is stored — the edit form never receives the old one to echo back.
+ */
+export type DatasourceInput = Omit<
+  Datasource,
+  "id" | "synced_at" | "table_count"
+> & { password: string };
+
+export interface DatasourceColumn {
+  name: string;
+  data_type: string;
+  description: string;
+}
+
+export interface DatasourceTable {
+  name: string;
+  description: string;
+  columns: DatasourceColumn[];
+}
+
+/** What a sync brought back. Zero tables means it connected and found nothing. */
+export interface SyncResult {
+  table_count: number;
+  column_count: number;
+  synced_at: string;
+}
+
 /** The server answers every failure with a detail, plus per-field errors when it can. */
 export interface ApiError {
   detail: string;
@@ -209,6 +263,29 @@ export const api = {
     call<void>(() =>
       http.delete(`/api/agents/${agentId}/documents/${documentId}`),
     ),
+
+  listDatasources: () => call<Datasource[]>(() => http.get("/api/datasources")),
+
+  createDatasource: (spec: DatasourceInput) =>
+    call<Datasource>(() => http.post("/api/datasources", spec)),
+
+  updateDatasource: (id: string, spec: DatasourceInput) =>
+    call<Datasource>(() => http.put(`/api/datasources/${id}`, spec)),
+
+  deleteDatasource: (id: string) =>
+    call<void>(() => http.delete(`/api/datasources/${id}`)),
+
+  /**
+   * Reads the target database's catalog and replaces the stored schema with it.
+   *
+   * Slow by nature — it opens a connection to somebody else's database — so callers
+   * should show it as work in progress rather than treat it like a save.
+   */
+  syncDatasource: (id: string) =>
+    call<SyncResult>(() => http.post(`/api/datasources/${id}/sync`, null)),
+
+  getDatasourceSchema: (id: string) =>
+    call<DatasourceTable[]>(() => http.get(`/api/datasources/${id}/schema`)),
 
   getCode: (id: string) => code(() => http.get(`/api/agents/${id}/code`, TEXT)),
 

@@ -29,7 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 
 from app import config, db, errors, tools
-from app.routers import agents, code, documents, graph, run
+from app.routers import agents, code, datasources, documents, graph, run
 from app.routers import tools as tools_router
 
 
@@ -179,6 +179,7 @@ errors.install(app)
 app.include_router(agents.router)
 app.include_router(tools_router.router)
 app.include_router(documents.router)
+app.include_router(datasources.router)
 app.include_router(code.router)
 app.include_router(graph.router)
 app.include_router(run.router)

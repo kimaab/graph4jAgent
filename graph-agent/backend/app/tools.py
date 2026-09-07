@@ -134,6 +134,53 @@ REGISTRY: list[BuiltinTool] = [
         },
         symbol="semantic_sql",
     ),
+    BuiltinTool(
+        name="nl2sql",
+        description=(
+            "Turn a data question into safe SQL against one of the databases "
+            "registered in the studio. Call with no arguments to list the available "
+            "databases; then with 'database' and 'question' to discover the tables "
+            "and columns relevant to the question; then with 'database' and 'ast' — "
+            "a JSON query spec built from what the previous call returned — to get "
+            "the compiled SQL. Only tables and columns present in the selected "
+            "database's synced schema can be reached."
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "database": {
+                    "type": _STRING,
+                    "description": (
+                        "Which registered database to query. Omit every argument "
+                        "to list the ones available."
+                    ),
+                },
+                "question": {
+                    "type": _STRING,
+                    "description": (
+                        "Step 1. The data question, in the user's own words. "
+                        "Returns the schema relevant to it."
+                    ),
+                },
+                "ast": {
+                    "type": _STRING,
+                    "description": (
+                        "Step 2. JSON query spec: "
+                        '{"target_table": "...", "aggregations": '
+                        '[{"field": "...", "function": "SUM", "alias": "..."}], '
+                        '"filters": [{"field": "...", "operator": "equals", '
+                        '"value": "..."}], "group_by": []}'
+                    ),
+                },
+            },
+            # Every step uses a different subset, and the listing step uses none.
+            "required": [],
+        },
+        symbol="nl2sql",
+        # The generated file reads the registered schema out of the studio's own
+        # Postgres, so it carries the driver even when document_search is not selected.
+        dependencies=["psycopg[binary]>=3.2"],
+    ),
 ]
 
 _BY_NAME = {tool.name: tool for tool in REGISTRY}

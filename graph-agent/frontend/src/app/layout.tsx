@@ -44,6 +44,17 @@ export default function RootLayout({
             <span className="text-xs text-zinc-500">
               LangGraph agents, defined in the browser
             </span>
+            <nav className="ml-auto flex items-center gap-4 text-xs">
+              <Link href="/agents" className="text-zinc-600 hover:underline dark:text-zinc-400">
+                에이전트
+              </Link>
+              <Link
+                href="/datasources"
+                className="text-zinc-600 hover:underline dark:text-zinc-400"
+              >
+                데이터소스
+              </Link>
+            </nav>
           </div>
         </header>
         <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">{children}</main>

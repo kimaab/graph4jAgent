@@ -9,6 +9,9 @@ dependencies = [
     "python-multipart",
     # PostgreSQL. The binary wheel avoids needing libpq on the host.
     "psycopg[binary,pool]>=3.2",
+    # Reading a registered MySQL/MariaDB's catalog at sync time. Pure Python, so
+    # it needs no client library on the host.
+    "pymysql>=1.1",
     # Page text extraction at upload time. The search path never re-parses a PDF.
     "pypdf>=5.1",
     # The graph the studio runs, and what the generated file imports.

@@ -181,3 +181,95 @@ class CodeStatus(BaseModel):
     """Whether an edit outranks the spec for this agent."""
 
     edited: bool
+
+
+class Driver(str, Enum):
+    """대상 DB의 종류. 인용 문자와 information_schema 질의가 여기서 갈립니다."""
+
+    MYSQL = "mysql"
+    POSTGRESQL = "postgresql"
+
+
+DEFAULT_PORTS = {Driver.MYSQL: 3306, Driver.POSTGRESQL: 5432}
+
+
+class DatasourceInput(BaseModel):
+    """등록 화면이 보내는 것. 비밀번호는 들어오기만 하고 나가지 않습니다."""
+
+    name: str
+    description: str = ""
+    driver: Driver
+    host: str
+    port: int = 0
+    db_name: str
+    # PostgreSQL에서만 의미가 있습니다. 비우면 'public'을 읽습니다.
+    db_schema: str = ""
+    username: str = ""
+    password: str = ""
+
+    @field_validator("name")
+    @classmethod
+    def _name_usable(cls, value: str) -> str:
+        # 모델이 인자로 적어 보낼 이름입니다. 공백이 섞이면 그때그때 다르게
+        # 적히고, 어느 쪽도 등록된 이름과 맞지 않습니다.
+        cleaned = (value or "").strip()
+        if not cleaned:
+            raise ValueError("must not be blank")
+        if any(c.isspace() for c in cleaned):
+            raise ValueError("must not contain spaces: the model passes it as a name")
+        return cleaned
+
+    @field_validator("host", "db_name")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("must not be blank")
+        return value.strip()
+
+    @model_validator(mode="after")
+    def _port_defaulted(self) -> "DatasourceInput":
+        # 0은 "안 적었다"는 뜻입니다. 폼에서 비워둔 것을 거절하는 대신 드라이버의
+        # 기본 포트를 씁니다 — 3306과 5432를 외우게 할 이유가 없습니다.
+        if self.port == 0:
+            self.port = DEFAULT_PORTS[self.driver]
+        if not 1 <= self.port <= 65535:
+            raise ValueError("port must be between 1 and 65535")
+        return self
+
+
+class Datasource(BaseModel):
+    """저장된 데이터소스. `password`가 없는 것이 이 클래스의 요점입니다."""
+
+    id: UUID
+    name: str
+    description: str
+    driver: Driver
+    host: str
+    port: int
+    db_name: str
+    db_schema: str
+    username: str
+    # 마지막으로 스키마를 읽어온 시각. 한 번도 동기화하지 않았으면 null이고,
+    # 그 상태의 데이터소스는 nl2sql에게 빈 스키마로 보입니다.
+    synced_at: str | None
+    table_count: int
+
+
+class DatasourceColumn(BaseModel):
+    name: str
+    data_type: str
+    description: str
+
+
+class DatasourceTable(BaseModel):
+    name: str
+    description: str
+    columns: list[DatasourceColumn]
+
+
+class SyncResult(BaseModel):
+    """동기화가 무엇을 가져왔는지. 0이면 접속은 됐지만 읽을 게 없었다는 뜻입니다."""
+
+    table_count: int
+    column_count: int
+    synced_at: str

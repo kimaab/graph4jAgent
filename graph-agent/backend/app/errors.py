@@ -32,6 +32,19 @@ class ApiException(Exception):
     def bad_request(detail: str) -> "ApiException":
         return ApiException(400, detail)
 
+    @staticmethod
+    def conflict(detail: str) -> "ApiException":
+        """The request was well formed but collides with what is already stored — a
+        datasource name that is taken, say. 400 would read as "you typed it wrong"."""
+        return ApiException(409, detail)
+
+    @staticmethod
+    def bad_gateway(detail: str) -> "ApiException":
+        """Something this server depends on failed, and it is not the caller's doing:
+        a registered database that will not answer. Reported apart from 500 so a
+        reachability problem is not mistaken for a bug in the studio."""
+        return ApiException(502, detail)
+
 
 class CodeCompilationException(Exception):
     """The user's own source did not compile. `errors` holds the interpreter's messages."""
