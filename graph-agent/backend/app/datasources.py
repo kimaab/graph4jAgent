@@ -205,6 +205,8 @@ def sync(datasource_id: UUID) -> SyncResult:
     driver = Driver(row["driver"])
     if driver is Driver.MYSQL:
         tables = _read_mysql(row)
+    elif driver is Driver.ORACLE:
+        tables = _read_oracle(row)
     else:
         tables = _read_postgresql(row)
 
@@ -420,6 +422,114 @@ def _read_postgresql(row: dict[str, Any]) -> list[DatasourceTable]:
         connection.close()
 
     return list(tables.values())
+
+
+def _read_oracle(row: dict[str, Any]) -> list[DatasourceTable]:
+    """Oracle의 데이터 딕셔너리를 읽습니다.
+
+    user_* 가 아니라 all_* 를 읽습니다. user_* 는 접속 계정 소유의 객체만 보여
+    주므로, 조회 전용 계정으로 남의 스키마를 읽는 흔한 구성에서 빈 스키마가
+    돌아옵니다. all_* 는 그 계정에 권한이 있는 것을 owner로 걸러 줍니다.
+
+    owner는 스키마 칸, 비어 있으면 접속 계정입니다. 대문자로 올리는 것은
+    Oracle이 따옴표 없는 식별자를 대문자로 저장하기 때문입니다 — 'hr'로 적힌
+    스키마는 데이터 딕셔너리에서 'HR'이고, 그대로 넣으면 한 건도 걸리지 않습니다.
+
+    테이블 목록을 all_tab_comments에서 뽑는 이유는 뷰 때문입니다. all_tables에는
+    뷰가 없고, MySQL·PostgreSQL 경로는 둘 다 뷰를 포함합니다.
+    """
+    try:
+        import oracledb
+    except ImportError as error:  # pragma: no cover - 의존성 누락은 배포 문제
+        raise ApiException.bad_request(
+            "the Oracle driver is not installed on the server (pip install oracledb)"
+        ) from error
+
+    owner = (row["db_schema"] or row["username"] or "").strip().upper()
+    if not owner:
+        raise ApiException.bad_request(
+            "an Oracle datasource needs a schema or a username to read the catalog of"
+        )
+
+    try:
+        connection = oracledb.connect(
+            user=row["username"],
+            password=row["password"],
+            host=row["host"],
+            port=row["port"],
+            service_name=row["db_name"],
+            # `connect_timeout`이 아닙니다 — python-oracledb가 받는 이름은
+            # 이것이고, 틀린 이름은 TypeError로 동기화 전체가 죽습니다.
+            tcp_connect_timeout=CONNECT_TIMEOUT,
+        )
+    except Exception as error:
+        raise _unreachable(row, error) from error
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT table_name, comments
+                  FROM all_tab_comments
+                 WHERE owner = :owner AND table_type IN ('TABLE', 'VIEW')
+                 ORDER BY table_name
+                """,
+                owner=owner,
+            )
+            tables = {
+                _text(name): DatasourceTable(
+                    name=_text(name), description=_text(comment), columns=[]
+                )
+                for name, comment in cursor.fetchall()
+            }
+
+            cursor.execute(
+                """
+                SELECT c.table_name, c.column_name, c.data_type, c.data_length,
+                       c.data_precision, c.data_scale, cc.comments
+                  FROM all_tab_columns c
+                  LEFT JOIN all_col_comments cc
+                    ON cc.owner = c.owner
+                   AND cc.table_name = c.table_name
+                   AND cc.column_name = c.column_name
+                 WHERE c.owner = :owner
+                 ORDER BY c.table_name, c.column_id
+                """,
+                owner=owner,
+            )
+            for table_name, column, type_name, length, precision, scale, comment in (
+                cursor.fetchall()
+            ):
+                table = tables.get(_text(table_name))
+                if table is not None:
+                    table.columns.append(
+                        DatasourceColumn(
+                            name=_text(column),
+                            data_type=_oracle_type(type_name, length, precision, scale),
+                            description=_text(comment),
+                        )
+                    )
+    finally:
+        connection.close()
+
+    return list(tables.values())
+
+
+def _oracle_type(name: Any, length: Any, precision: Any, scale: Any) -> str:
+    """`VARCHAR2(36)`, `NUMBER(10,2)` — 길이까지 붙인 컬럼 타입.
+
+    다른 두 드라이버가 길이를 싣는 것과 맞춥니다. MySQL은 COLUMN_TYPE,
+    PostgreSQL은 format_type이 이미 그렇게 주고, 모델이 보는 계약서에서
+    `VARCHAR2`와 `VARCHAR2(36)`은 다른 정보입니다.
+    """
+    base = _text(name).upper()
+    if base == "NUMBER":
+        if precision is None:
+            return "NUMBER"
+        return f"NUMBER({precision},{scale})" if scale else f"NUMBER({precision})"
+    if base in ("VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR", "RAW") and length:
+        return f"{base}({length})"
+    return base
 
 
 def _unreachable(row: dict[str, Any], error: Exception) -> ApiException:

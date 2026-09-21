@@ -51,7 +51,7 @@ _LIST_OPERATORS = {"in": "IN", "not_in": "NOT IN"}
 
 # 드라이버별 식별자 인용 문자. MySQL은 백틱, PostgreSQL은 쌍따옴표입니다.
 # 잘못 고르면 예약어 컬럼(`status`, `order`, `rank`)에서 문법 오류가 납니다.
-_QUOTE = {"mysql": "`", "postgresql": '"'}
+_QUOTE = {"mysql": "`", "postgresql": '"', "oracle": '"'}
 
 # 시간 버킷. 표현식이므로 문자열을 조립하지만, unit은 아래 표의 키로만 들어올
 # 수 있어 모델이 무엇을 적어 보내도 이 중 하나가 되거나 거부됩니다.
@@ -71,6 +71,14 @@ _BUCKETS = {
         "day": "DATE_FORMAT({col}, '%Y-%m-%d')",
         "month": "DATE_FORMAT({col}, '%Y-%m-01')",
     },
+    # Oracle에는 date_trunc가 없고 TRUNC의 두 번째 인자가 그 일을 합니다.
+    # 'HH'는 시, 'MI'는 분, 'MM'은 월이고, 인자를 생략하면 일 단위입니다.
+    "oracle": {
+        "minute": "TRUNC({col}, 'MI')",
+        "hour": "TRUNC({col}, 'HH')",
+        "day": "TRUNC({col})",
+        "month": "TRUNC({col}, 'MM')",
+    },
 }
 
 _DIRECTIONS = {"asc": "ASC", "desc": "DESC"}
@@ -82,6 +90,16 @@ _DIRECTIONS = {"asc": "ASC", "desc": "DESC"}
 _TIMESTAMP_CAST = {
     "postgresql": "CAST({col} AS timestamp)",
     "mysql": "CAST({col} AS DATETIME)",
+    "oracle": "CAST({col} AS TIMESTAMP)",
+}
+
+# 행수를 제한하는 문법. Oracle에는 LIMIT이 없습니다 — 붙이면 "ORA-00933: SQL
+# command not properly ended"로 죽고, 모델은 그 메시지에서 회복하지 못합니다.
+# FETCH FIRST는 12c부터입니다.
+_ROW_LIMIT = {
+    "postgresql": "LIMIT {n}",
+    "mysql": "LIMIT {n}",
+    "oracle": "FETCH FIRST {n} ROWS ONLY",
 }
 
 
@@ -473,6 +491,7 @@ class _Compiler:
         self.quote = _QUOTE.get(self.driver, '"')
         self.buckets = _BUCKETS.get(self.driver, _BUCKETS["postgresql"])
         self.cast = _TIMESTAMP_CAST.get(self.driver, _TIMESTAMP_CAST["postgresql"])
+        self.row_limit = _ROW_LIMIT.get(self.driver, _ROW_LIMIT["postgresql"])
 
     KEYS = {
         "target_table", "columns", "aggregations", "time_bucket",
@@ -592,7 +611,7 @@ class _Compiler:
         if ordering:
             clauses.append("ORDER BY " + ", ".join(ordering))
 
-        clauses.append(f"LIMIT {self._limit(ast.get('limit'))}")
+        clauses.append(self.row_limit.format(n=self._limit(ast.get("limit"))))
         return " ".join(clauses) + ";"
 
     def _limit(self, value) -> int:
@@ -834,6 +853,34 @@ def _run(contract: dict, sql: str):
         try:
             with connection.cursor() as cursor:
                 _mysql_timeout(cursor)
+                cursor.execute(sql.rstrip(";"))
+                names = [d[0] for d in (cursor.description or [])]
+                return names, cursor.fetchall()
+        finally:
+            connection.close()
+
+    if contract["driver"] == "oracle":
+        import oracledb
+
+        connection = oracledb.connect(
+            user=where["user"], password=where["password"],
+            host=where["host"], port=where["port"], service_name=where["dbname"],
+            tcp_connect_timeout=10,
+        )
+        # 세션 변수가 아니라 클라이언트 쪽 상한입니다. Oracle에서 서버 쪽으로
+        # 같은 일을 하려면 리소스 관리자 프로파일을 걸어야 하고, 그것은 조회
+        # 계정이 건드릴 수 있는 물건이 아닙니다.
+        connection.call_timeout = QUERY_TIMEOUT_MS
+        try:
+            with connection.cursor() as cursor:
+                if where["schema"]:
+                    # 컴파일된 SQL은 테이블 이름만 담습니다. 조회 계정이 소유자가
+                    # 아니면 이것 없이는 "ORA-00942: table or view does not exist"가
+                    # 납니다 — 권한은 있는데 이름이 안 풀리는 흔한 경우입니다.
+                    cursor.execute(
+                        "ALTER SESSION SET CURRENT_SCHEMA = "
+                        + _Compiler(contract)._identifier(where["schema"].upper())
+                    )
                 cursor.execute(sql.rstrip(";"))
                 names = [d[0] for d in (cursor.description or [])]
                 return names, cursor.fetchall()

@@ -23,10 +23,13 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from dotenv import load_dotenv
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
+
+load_dotenv()
 
 from app import config, db, errors, tools
 from app.routers import agents, code, datasources, documents, graph, run

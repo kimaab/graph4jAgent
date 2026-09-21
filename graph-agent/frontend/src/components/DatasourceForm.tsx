@@ -5,7 +5,7 @@ import type { Datasource, DatasourceInput, Driver } from "@/api/client";
 import { Field, fieldClass, inputClass } from "@/components/Field";
 
 /** The port each driver uses when the form leaves it blank. */
-const DEFAULT_PORT: Record<Driver, number> = { mysql: 3306, postgresql: 5432 };
+const DEFAULT_PORT: Record<Driver, number> = { mysql: 3306, postgresql: 5432, oracle: 1521 };
 
 /**
  * Register or edit one database.
@@ -86,6 +86,7 @@ export function DatasourceForm({
           >
             <option value="mysql">MySQL / MariaDB</option>
             <option value="postgresql">PostgreSQL</option>
+            <option value="oracle">Oracle</option>
           </select>
         </Field>
 
@@ -113,11 +114,19 @@ export function DatasourceForm({
           </Field>
         </div>
 
-        <Field label="데이터베이스" error={fieldErrors.db_name}>
+        <Field
+          label={form.driver === "oracle" ? "서비스 이름" : "데이터베이스"}
+          error={fieldErrors.db_name}
+          hint={
+            form.driver === "oracle"
+              ? "SID가 아니라 service name입니다 (ORCLPDB1 등)."
+              : undefined
+          }
+        >
           <input
             value={form.db_name}
             onChange={(e) => set("db_name", e.target.value)}
-            placeholder="aspirin"
+            placeholder={form.driver === "oracle" ? "ORCLPDB1" : "aspirin"}
             className={fieldClass(Boolean(fieldErrors.db_name))}
           />
         </Field>
@@ -125,18 +134,23 @@ export function DatasourceForm({
         {/*
           MySQL calls a schema and a database the same thing, so asking for both there
           would be asking the same question twice — and any answer but the database name
-          would be wrong.
+          would be wrong. Oracle does have the distinction: a schema is an owner, and a
+          read-only account reading somebody else's tables is the ordinary setup.
         */}
-        {form.driver === "postgresql" && (
+        {form.driver !== "mysql" && (
           <Field
             label="스키마"
             error={fieldErrors.db_schema}
-            hint="비우면 public"
+            hint={
+              form.driver === "oracle"
+                ? "테이블 소유자. 비우면 접속 계정, 대문자로 조회합니다."
+                : "비우면 public"
+            }
           >
             <input
               value={form.db_schema}
               onChange={(e) => set("db_schema", e.target.value)}
-              placeholder="public"
+              placeholder={form.driver === "oracle" ? "HR" : "public"}
               className={fieldClass(Boolean(fieldErrors.db_schema))}
             />
           </Field>

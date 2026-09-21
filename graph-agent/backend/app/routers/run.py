@@ -33,6 +33,9 @@ def run(agent_id: UUID, request: RunRequest) -> StreamingResponse:
     # Built before the response is handed back: source that will not load should fail as
     # a 400 on this request, not as an error event on a stream the client has accepted.
     graph = runner.build(spec)
+    log.info(
+        "graph \n%s",graph
+    )
     config = runner.run_config(spec, request.thread_id)
 
     return StreamingResponse(

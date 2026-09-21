@@ -188,9 +188,10 @@ class Driver(str, Enum):
 
     MYSQL = "mysql"
     POSTGRESQL = "postgresql"
+    ORACLE = "oracle"
 
 
-DEFAULT_PORTS = {Driver.MYSQL: 3306, Driver.POSTGRESQL: 5432}
+DEFAULT_PORTS = {Driver.MYSQL: 3306, Driver.POSTGRESQL: 5432, Driver.ORACLE: 1521}
 
 
 class DatasourceInput(BaseModel):

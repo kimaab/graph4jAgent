@@ -69,7 +69,7 @@ export interface ToolInfo {
 
 /** Which database a datasource points at. Decides how its schema is read and, later,
  *  how the nl2sql tool quotes identifiers. */
-export type Driver = "mysql" | "postgresql";
+export type Driver = "mysql" | "postgresql" | "oracle";
 
 /**
  * A database the nl2sql tool may query.
@@ -85,7 +85,8 @@ export interface Datasource {
   host: string;
   port: number;
   db_name: string;
-  /** PostgreSQL only; blank means "public". MySQL has no schema apart from the database. */
+  /** PostgreSQL and Oracle only; blank means "public" / the connecting user.
+   *  MySQL has no schema apart from the database. */
   db_schema: string;
   username: string;
   /** When the schema was last read off the target database; null until a sync runs. */
